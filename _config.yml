@@ -1,0 +1,5 @@
+title: lxconnect
+description: Android to Linux Desktop Bridge (Waydroid & Native)
+remote_theme: rphlmr/jekyll-gruvbox-theme
+plugins:
+  - jekyll-remote-theme
