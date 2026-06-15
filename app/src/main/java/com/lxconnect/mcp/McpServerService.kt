@@ -1,0 +1,779 @@
+package com.lxconnect.mcp
+
+import android.app.Notification
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
+import android.os.Build
+import android.os.IBinder
+import android.provider.Telephony
+import android.telephony.SmsManager
+import android.util.Log
+import androidx.core.app.NotificationCompat
+import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.*
+import io.ktor.server.engine.*
+import io.ktor.server.netty.*
+import io.ktor.server.response.*
+import io.ktor.server.routing.*
+import io.modelcontextprotocol.kotlin.sdk.*
+import io.modelcontextprotocol.kotlin.sdk.server.*
+import io.modelcontextprotocol.kotlin.sdk.types.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.*
+import java.io.File
+import android.os.Environment
+import android.util.Base64
+
+fun JsonElement?.asString(name: String): String = this?.jsonPrimitive?.content ?: throw IllegalArgumentException("Missing $name")
+
+class McpServerService : Service() {
+
+    private val serviceScope = CoroutineScope(Dispatchers.IO)
+    private var serverEngine: EmbeddedServer<*, *>? = null
+    private var mcpServer: Server? = null
+
+    // For testing, we hardcode a pairing key
+    private val secureSharedKey = "test-key-999"
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+        startForegroundService()
+        startMcpServer()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        return START_STICKY
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (instance == this) {
+            instance = null
+        }
+        serverEngine?.stop(1000, 2000)
+        serviceScope.cancel()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun startForegroundService() {
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification: Notification = NotificationCompat.Builder(this, McpApplication.CHANNEL_ID)
+            .setContentTitle("lxconnect MCP Server Running")
+            .setContentText("Listening on port 8080. Pairing Key: $secureSharedKey")
+            .setSmallIcon(android.R.drawable.stat_sys_phone_call)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun startMcpServer() {
+        // Inspect ClientConnection class fields and methods
+        try {
+            val connClass = Class.forName("io.modelcontextprotocol.kotlin.sdk.server.ClientConnection")
+            Log.i("McpInspect", "--- CLIENTCONNECTION CLASS FIELDS ---")
+            connClass.declaredFields.forEach {
+                Log.i("McpInspect", "Field: ${it.name} (${it.type.name})")
+            }
+            Log.i("McpInspect", "--- CLIENTCONNECTION CLASS METHODS ---")
+            connClass.declaredMethods.forEach {
+                Log.i("McpInspect", "Method: ${it.name} returns ${it.returnType.name}")
+            }
+        } catch (e: Exception) {
+            Log.e("McpInspect", "Failed to inspect ClientConnection class", e)
+        }
+
+        serverEngine = embeddedServer(Netty, port = 8080) {
+            // Install Ktor SSE Plugin (required by MCP SDK for SSE transport routing)
+            install(io.ktor.server.sse.SSE)
+
+            // Install simple auth interceptor
+            intercept(ApplicationCallPipeline.Plugins) {
+                val authHeader = call.request.headers["Authorization"]
+                if (authHeader != "Bearer $secureSharedKey") {
+                    call.respond(HttpStatusCode.Unauthorized, "Unauthorized: Invalid or missing shared key.")
+                    finish()
+                }
+            }
+
+            routing {
+                // Ktor 3.x mcp builder takes a block returning the Server instance
+                mcp {
+                    createMcpServerInstance().also { mcpServer = it }
+                }
+            }
+        }.start(wait = false)
+        Log.i(TAG, "Ktor Netty Server started on port 8080")
+    }
+
+    private fun createMcpServerInstance(): Server {
+        val server = Server(
+            serverInfo = Implementation(name = "lxconnect-android-mcp", version = "1.0.0"),
+            options = ServerOptions(
+                capabilities = ServerCapabilities(
+                    tools = ServerCapabilities.Tools(listChanged = true)
+                )
+            )
+        )
+
+        // Tool 1: list_notifications
+        server.addTool(
+            name = "list_notifications",
+            description = "Retrieve all active status bar notifications from the phone.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {},
+                required = emptyList()
+            )
+        ) {
+            val notifications = CustomNotificationListener.getActiveNotifications()
+            val text = if (notifications.isEmpty()) {
+                "No active notifications found."
+            } else {
+                notifications.joinToString("\n\n") { n ->
+                    "Key: ${n["key"]}\nApp: ${n["packageName"]}\nTitle: ${n["title"]}\nText: ${n["text"]}"
+                }
+            }
+            CallToolResult(content = listOf(TextContent(text = text)))
+        }
+
+        // Tool 1: get_active_notifications
+        server.addTool(
+            name = "get_active_notifications",
+            description = "Get a list of currently active Android notifications.",
+            inputSchema = ToolSchema(properties = buildJsonObject {})
+        ) {
+            val notifications = CustomNotificationListener.getActiveNotifications()
+            val textContent = if (notifications.isEmpty()) {
+                "No active notifications."
+            } else {
+                notifications.joinToString("\n---\n") { 
+                    "App: ${it["packageName"]}\nKey: ${it["key"]}\nTitle: ${it["title"]}\nText: ${it["text"]}" 
+                }
+            }
+            CallToolResult(content = listOf(TextContent(text = textContent)))
+        }
+
+        // Tool 2: reply_to_notification
+        server.addTool(
+            name = "reply_to_notification",
+            description = "Send a text reply to an active chat/message notification.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("notificationKey") {
+                        put("type", "string")
+                        put("description", "The unique notification key returned by list_notifications.")
+                    }
+                    putJsonObject("replyText") {
+                        put("type", "string")
+                        put("description", "Text to send as the reply.")
+                    }
+                },
+                required = listOf("notificationKey", "replyText")
+            )
+        ) { request ->
+            val key = request.params.arguments?.get("notificationKey").asString("notificationKey")
+            val text = request.params.arguments?.get("replyText").asString("replyText")
+
+            val success = CustomNotificationListener.reply(key, text)
+            if (success) {
+                CallToolResult(content = listOf(TextContent(text = "Reply sent successfully.")))
+            } else {
+                CallToolResult(content = listOf(TextContent(text = "Failed to reply. Notification might be gone, or doesn't support direct replies.")), isError = true)
+            }
+        }
+
+        // Tool 3: send_sms
+        server.addTool(
+            name = "send_sms",
+            description = "Send an SMS text message to a phone number.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("phoneNumber") {
+                        put("type", "string")
+                        put("description", "The recipient's phone number.")
+                    }
+                    putJsonObject("message") {
+                        put("type", "string")
+                        put("description", "The body of the text message.")
+                    }
+                },
+                required = listOf("phoneNumber", "message")
+            )
+        ) { request ->
+            val phoneNumber = request.params.arguments?.get("phoneNumber").asString("phoneNumber")
+            val message = request.params.arguments?.get("message").asString("message")
+
+            val smsManager = getSystemService(SmsManager::class.java)
+            smsManager.sendTextMessage(phoneNumber, null, message, null, null)
+            CallToolResult(content = listOf(TextContent(text = "SMS sent successfully to $phoneNumber.")))
+        }
+
+        // Tool 4: get_sms_history
+        server.addTool(
+            name = "get_sms_history",
+            description = "Read the history of SMS messages on the device.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("limit") {
+                        put("type", "integer")
+                        put("description", "Max number of messages to fetch (default: 10).")
+                    }
+                },
+                required = emptyList()
+            )
+        ) { request ->
+            val limit = request.params.arguments?.get("limit")?.jsonPrimitive?.int ?: 10
+            val list = mutableListOf<String>()
+
+            try {
+                val cursor = contentResolver.query(
+                    Telephony.Sms.CONTENT_URI,
+                    arrayOf("_id", "address", "body", "date", "type"),
+                    null, null, "date DESC LIMIT $limit"
+                )
+                cursor?.use {
+                    while (it.moveToNext()) {
+                        val address = it.getString(it.getColumnIndexOrThrow("address")) ?: "Unknown"
+                        val body = it.getString(it.getColumnIndexOrThrow("body")) ?: ""
+                        val type = it.getString(it.getColumnIndexOrThrow("type")) ?: "1"
+                        val folder = if (type == "1") "Inbox" else "Sent"
+                        list.add("From/To: $address ($folder)\nContent: $body")
+                    }
+                }
+                val resultText = if (list.isEmpty()) {
+                    "No SMS history found."
+                } else {
+                    list.joinToString("\n\n---\n\n")
+                }
+                CallToolResult(content = listOf(TextContent(text = resultText)))
+            } catch (e: Exception) {
+                CallToolResult(content = listOf(TextContent(text = "Failed to read SMS database: ${e.message}")), isError = true)
+            }
+        }
+
+        // Tool 5: get_device_info
+        server.addTool(
+            name = "get_device_info",
+            description = "Get battery and simple device status.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {},
+                required = emptyList()
+            )
+        ) {
+            val batteryIntent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            val pct = if (level >= 0 && scale > 0) (level * 100 / scale) else -1
+            
+            val info = "Model: ${Build.MODEL}\nManufacturer: ${Build.MANUFACTURER}\nAndroid Version: ${Build.VERSION.RELEASE}\nBattery: $pct%"
+            CallToolResult(content = listOf(TextContent(text = info)))
+        }
+
+        // Tool 6: get_clipboard
+        server.addTool(
+            name = "get_clipboard",
+            description = "Get the current text from the device clipboard.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {},
+                required = emptyList()
+            )
+        ) {
+            var clipboardText = ""
+            withContext(Dispatchers.Main) {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = clipboard.primaryClip
+                if (clip != null && clip.itemCount > 0) {
+                    clipboardText = clip.getItemAt(0).text?.toString() ?: ""
+                }
+            }
+            CallToolResult(content = listOf(TextContent(text = clipboardText.ifEmpty { "Clipboard is empty or contains non-text content." })))
+        }
+
+        // Tool 7: set_clipboard
+        server.addTool(
+            name = "set_clipboard",
+            description = "Set the text on the device clipboard.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("text") {
+                        put("type", "string")
+                        put("description", "The text to set on the clipboard.")
+                    }
+                },
+                required = listOf("text")
+            )
+        ) { request ->
+            val text = request.params.arguments?.get("text").asString("text")
+            withContext(Dispatchers.Main) {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = android.content.ClipData.newPlainText("lxconnect", text)
+                clipboard.setPrimaryClip(clip)
+            }
+            CallToolResult(content = listOf(TextContent(text = "Clipboard updated successfully.")))
+        }
+
+        // Tool 8: get_media_status
+        server.addTool(
+            name = "get_media_status",
+            description = "Get status of active media players (e.g. playing track, artist, album).",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {},
+                required = emptyList()
+            )
+        ) {
+            val list = CustomNotificationListener.getMediaStatus()
+            val resultText = if (list.isEmpty()) {
+                "No active media sessions found."
+            } else {
+                list.joinToString("\n\n---\n\n") { m ->
+                    "Player: ${m["packageName"]}\nStatus: ${m["state"]}\nTitle: ${m["title"]}\nArtist: ${m["artist"]}\nAlbum: ${m["album"]}"
+                }
+            }
+            CallToolResult(content = listOf(TextContent(text = resultText)))
+        }
+
+        // Tool 9: control_media
+        server.addTool(
+            name = "control_media",
+            description = "Control media playback on the device.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("command") {
+                        put("type", "string")
+                        put("description", "Playback command: 'play', 'pause', 'skip', or 'previous'.")
+                    }
+                    putJsonObject("packageName") {
+                        put("type", "string")
+                        put("description", "Optional package name of the media player to target.")
+                    }
+                },
+                required = listOf("command")
+            )
+        ) { request ->
+            val command = request.params.arguments?.get("command").asString("command")
+            val pkg = request.params.arguments?.get("packageName")?.jsonPrimitive?.content
+
+            val success = CustomNotificationListener.controlMedia(pkg, command)
+            if (success) {
+                CallToolResult(content = listOf(TextContent(text = "Command '$command' sent successfully.")))
+            } else {
+                CallToolResult(content = listOf(TextContent(text = "Failed to send command. Ensure a media player is active.")), isError = true)
+            }
+        }
+
+        // Tool 10: ring_device
+        server.addTool(
+            name = "ring_device",
+            description = "Make the device ring at max volume to locate it, or stop ringing.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("action") {
+                        put("type", "string")
+                        put("description", "The action to perform: 'start' to ring, 'stop' to silence it.")
+                    }
+                },
+                required = listOf("action")
+            )
+        ) { request ->
+            val action = request.params.arguments?.get("action")?.jsonPrimitive?.content ?: "start"
+            val text = ringDevice(action)
+            CallToolResult(content = listOf(TextContent(text = text)))
+        }
+
+        // Tool 11: get_detailed_status
+        server.addTool(
+            name = "get_detailed_status",
+            description = "Get detailed battery, Wi-Fi, storage, RAM, and telephony stats.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {},
+                required = emptyList()
+            )
+        ) {
+            // 1. Battery status
+            val batteryIntent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            val pct = if (level >= 0 && scale > 0) (level * 100 / scale) else -1
+            val temp = batteryIntent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1) ?: -1
+            val tempC = if (temp != -1) temp / 10.0 else 0.0
+            val statusVal = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+            val isCharging = statusVal == BatteryManager.BATTERY_STATUS_CHARGING || statusVal == BatteryManager.BATTERY_STATUS_FULL
+
+            // 2. RAM Info
+            val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+            val memoryInfo = android.app.ActivityManager.MemoryInfo()
+            activityManager.getMemoryInfo(memoryInfo)
+            val totalMemGB = String.format("%.2f", memoryInfo.totalMem / (1024.0 * 1024.0 * 1024.0))
+            val availMemGB = String.format("%.2f", memoryInfo.availMem / (1024.0 * 1024.0 * 1024.0))
+
+            // 3. Storage Info
+            val path = android.os.Environment.getDataDirectory()
+            val stat = android.os.StatFs(path.path)
+            val totalStorageGB = String.format("%.2f", (stat.blockCountLong * stat.blockSizeLong) / (1024.0 * 1024.0 * 1024.0))
+            val freeStorageGB = String.format("%.2f", (stat.availableBlocksLong * stat.blockSizeLong) / (1024.0 * 1024.0 * 1024.0))
+
+            // 4. Wi-Fi SSID
+            var ssid = "N/A"
+            var rssi = -127
+            try {
+                val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+                val wifiInfo = wifiManager.connectionInfo
+                if (wifiInfo != null) {
+                    ssid = wifiInfo.ssid ?: "N/A"
+                    rssi = wifiInfo.rssi
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to get Wi-Fi info", e)
+            }
+
+            // 5. Telephony / Carrier
+            var carrierName = "Unknown"
+            try {
+                val telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager
+                carrierName = telephonyManager.networkOperatorName ?: "Unknown"
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to get carrier name", e)
+            }
+
+            val details = """
+                Device: ${Build.MANUFACTURER} ${Build.MODEL}
+                Android Version: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})
+                
+                Battery: $pct% (${if (isCharging) "Charging" else "Discharging"})
+                Battery Temperature: $tempC°C
+                
+                RAM: $availMemGB GB free / $totalMemGB GB total
+                Storage: $freeStorageGB GB free / $totalStorageGB GB total
+                
+                Wi-Fi SSID: $ssid (RSSI: $rssi dBm)
+                Carrier: $carrierName
+            """.trimIndent()
+            CallToolResult(content = listOf(TextContent(text = details)))
+        }
+
+        // Tool 12: take_picture
+        server.addTool(
+            name = "take_picture",
+            description = "Capture a photo from the back camera of the device and return the image data.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {},
+                required = emptyList()
+            )
+        ) {
+            val result = CameraActivity.capturePhoto(this@McpServerService)
+            if (result.base64 != null) {
+                CallToolResult(
+                    content = listOf(
+                        ImageContent(
+                            data = result.base64,
+                            mimeType = "image/jpeg"
+                        )
+                    )
+                )
+            } else {
+                CallToolResult(
+                    content = listOf(
+                        TextContent(
+                            text = "Failed to take picture: ${result.error}"
+                        )
+                    ),
+                    isError = true
+                )
+            }
+        }
+
+        // Tool 13: start_app
+        server.addTool(
+            name = "start_app",
+            description = "Launch an application on the device by its package name.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("packageName") {
+                        put("type", "string")
+                        put("description", "The Android package name of the app to launch (e.g. 'com.android.chrome').")
+                    }
+                },
+                required = listOf("packageName")
+            )
+        ) { request ->
+            val packageName = request.params.arguments?.get("packageName").asString("packageName")
+            val intent = packageManager.getLaunchIntentForPackage(packageName)
+            if (intent != null) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(intent)
+                CallToolResult(content = listOf(TextContent(text = "Successfully launched app: $packageName")))
+            } else {
+                CallToolResult(content = listOf(TextContent(text = "Failed to launch app. Package '$packageName' not found or cannot be opened.")), isError = true)
+            }
+        }
+
+        val baseDownloadDir = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "lxconnect")
+        if (baseDownloadDir != null && !baseDownloadDir.exists()) {
+            baseDownloadDir.mkdirs()
+        }
+
+        // Tool 15: list_files
+        server.addTool(
+            name = "list_files",
+            description = "List files in the device's Download/lxconnect directory.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {},
+                required = emptyList()
+            )
+        ) {
+            val files = baseDownloadDir.listFiles()
+            val text = if (files == null || files.isEmpty()) {
+                "No files found in ${baseDownloadDir.absolutePath}"
+            } else {
+                files.joinToString("\n") {
+                    "${if (it.isDirectory) "[DIR]" else "[FILE]"} ${it.name} (${it.length()} bytes)"
+                }
+            }
+            CallToolResult(content = listOf(TextContent(text = text)))
+        }
+
+        // Tool 16: send_file
+        server.addTool(
+            name = "send_file",
+            description = "Send a file from Linux to the Android device.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("fileName") {
+                        put("type", "string")
+                        put("description", "Target filename.")
+                    }
+                    putJsonObject("base64Data") {
+                        put("type", "string")
+                        put("description", "Base64 encoded file data.")
+                    }
+                },
+                required = listOf("fileName", "base64Data")
+            )
+        ) { request ->
+            val fileName = request.params.arguments?.get("fileName").asString("fileName")
+            val base64Data = request.params.arguments?.get("base64Data").asString("base64Data")
+
+            // basic traversal prevention
+            if (fileName.contains("/") || fileName.contains("..")) {
+                throw IllegalArgumentException("Invalid filename")
+            }
+
+            val targetFile = File(baseDownloadDir, fileName)
+            val bytes = Base64.decode(base64Data, Base64.DEFAULT)
+            targetFile.writeBytes(bytes)
+            CallToolResult(content = listOf(TextContent(text = "File successfully written to ${targetFile.absolutePath}")))
+        }
+
+        // Tool 17: get_file
+        server.addTool(
+            name = "get_file",
+            description = "Retrieve a file from the Android device.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("fileName") {
+                        put("type", "string")
+                        put("description", "Filename to retrieve from the Download/lxconnect directory.")
+                    }
+                },
+                required = listOf("fileName")
+            )
+        ) { request ->
+            val fileName = request.params.arguments?.get("fileName").asString("fileName")
+
+            if (fileName.contains("/") || fileName.contains("..")) {
+                throw IllegalArgumentException("Invalid filename")
+            }
+
+            val targetFile = File(baseDownloadDir, fileName)
+            if (!targetFile.exists() || !targetFile.isFile) {
+                throw IllegalArgumentException("File not found: ${targetFile.absolutePath}")
+            }
+            
+            val bytes = targetFile.readBytes()
+            val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+            CallToolResult(content = listOf(TextContent(text = b64)))
+        }
+
+        // Tool 14: stop_app
+        server.addTool(
+            name = "stop_app",
+            description = "Kill background processes for a specific package. (Note: Due to Android security, this only kills background services and processes, not foreground activities).",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("packageName") {
+                        put("type", "string")
+                        put("description", "The package name of the app to stop (e.g. 'com.spotify.music').")
+                    }
+                },
+                required = listOf("packageName")
+            )
+        ) { request ->
+            val packageName = request.params.arguments?.get("packageName").asString("packageName")
+            
+            val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+            activityManager.killBackgroundProcesses(packageName)
+            CallToolResult(content = listOf(TextContent(text = "Requested system to stop background processes for package: $packageName")))
+        }
+
+        // Tool 18: open_deep_link
+        server.addTool(
+            name = "open_deep_link",
+            description = "Open an Android deep link URI to navigate within specific apps (e.g. 'spotify:search:myquery' or 'geo:0,0?q=my+location').",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("uri") {
+                        put("type", "string")
+                        put("description", "The deep link URI to open.")
+                    }
+                },
+                required = listOf("uri")
+            )
+        ) { request ->
+            val uriString = request.params.arguments?.get("uri").asString("uri")
+            val uri = android.net.Uri.parse(uriString)
+            val intent = Intent(Intent.ACTION_VIEW, uri)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            
+            try {
+                startActivity(intent)
+                CallToolResult(content = listOf(TextContent(text = "Successfully opened deep link: $uriString")))
+            } catch (e: android.content.ActivityNotFoundException) {
+                throw IllegalArgumentException("No application found to handle the URI: $uriString")
+            }
+        }
+
+        // Tool 19: debug_mock_notification
+        server.addTool(
+            name = "debug_mock_notification",
+            description = "Post a mock notification with a reply action for testing",
+            inputSchema = ToolSchema(properties = buildJsonObject {})
+        ) {
+            val replyLabel = "Reply here"
+            val remoteInput = android.app.RemoteInput.Builder("reply_key").setLabel(replyLabel).build()
+            
+            val resultIntent = Intent(this@McpServerService, MainActivity::class.java)
+            val pendingIntent = android.app.PendingIntent.getActivity(
+                this@McpServerService, 0, resultIntent, 
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_MUTABLE
+            )
+            
+            val action = android.app.Notification.Action.Builder(
+                android.R.drawable.ic_menu_send, "Reply", pendingIntent
+            ).addRemoteInput(remoteInput).build()
+            
+            val builder = android.app.Notification.Builder(this@McpServerService, "mcp_service_channel")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("👻 Snapchat")
+                .setContentText("Hey! Are you there? (Mock Message)")
+                .addAction(action)
+                
+            val notificationManager = getSystemService(android.app.NotificationManager::class.java)
+            notificationManager.notify(999, builder.build())
+            
+            CallToolResult(content = listOf(TextContent(text = "Mock notification posted! Check your Linux desktop!")))
+        }
+
+        return server
+    }
+
+    private fun ringDevice(action: String): String {
+        if (action.lowercase() == "stop") {
+            activeRingtone?.stop()
+            activeRingtone = null
+            return "Ringtone stopped."
+        }
+
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+            // Set ringer mode to normal and volume to max
+            audioManager.ringerMode = android.media.AudioManager.RINGER_MODE_NORMAL
+            val maxVolume = audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_RING)
+            audioManager.setStreamVolume(android.media.AudioManager.STREAM_RING, maxVolume, 0)
+            
+            val ringtoneUri = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_RINGTONE)
+            val ringtone = android.media.RingtoneManager.getRingtone(this, ringtoneUri)
+            ringtone?.play()
+            activeRingtone = ringtone
+            return "Device is ringing at maximum volume."
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to ring device", e)
+            return "Error playing ringtone: ${e.message}"
+        }
+    }
+
+    fun broadcastNotification(key: String, packageName: String, title: String, text: String) {
+        serviceScope.launch {
+            try {
+                mcpServer?.let { server ->
+                    val sessions = server.sessions
+                    if (sessions.isNotEmpty()) {
+                        val params = buildJsonObject {
+                            put("key", key)
+                            put("packageName", packageName)
+                            put("title", title)
+                            put("text", text)
+                            put("time", System.currentTimeMillis())
+                        }
+                        
+                        sessions.values.forEach { session ->
+                            try {
+                                val conn = connField?.get(session)
+                                if (conn != null) {
+                                    if (notificationMethod == null) {
+                                        notificationMethod = conn.javaClass.methods.find { it.name == "notification" && it.parameterCount == 2 }
+                                        notificationMethod?.isAccessible = true
+                                    }
+                                    notificationMethod?.invoke(conn, "notifications/phone_notification", params)
+                                    Log.d(TAG, "Successfully pushed notification to client session.")
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error pushing notification to session", e)
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in broadcastNotification", e)
+            }
+        }
+    }
+
+    companion object {
+        private const val TAG = "McpServerService"
+        private const val NOTIFICATION_ID = 42
+        private var activeRingtone: android.media.Ringtone? = null
+
+        private val connField by lazy {
+            try {
+                val sessionClass = Class.forName("io.modelcontextprotocol.kotlin.sdk.server.ServerSession")
+                val field = sessionClass.declaredFields.find { it.name == "clientConnection" || it.name.endsWith("clientConnection") }
+                field?.isAccessible = true
+                field
+            } catch (e: Exception) { null }
+        }
+        private var notificationMethod: java.lang.reflect.Method? = null
+
+        @Volatile
+        var instance: McpServerService? = null
+    }
+}
