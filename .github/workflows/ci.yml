@@ -29,9 +29,9 @@ jobs:
         with:
           python-version: "3"
       - name: py_compile
-        run: python -m py_compile daemon/main.py daemon/mcp_client.py daemon/gui.py daemon/test_mcp_client.py
+        run: python -m py_compile daemon/*.py
       - name: unit tests
-        run: cd daemon && python -m unittest test_mcp_client -v
+        run: cd daemon && python -m unittest discover -p "test_*.py" -v
 
   flake:
     name: Flake check
