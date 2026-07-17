@@ -4,7 +4,9 @@ layout: default
 
 # lxconnect 🚀
 
-**Android to Linux Desktop Bridge** for Waydroid and Native Android environments.
+**Android to Linux Desktop Bridge** for Waydroid and Native Android environments — control your phone (or let an AI agent control it) from your Linux desktop over a pinned-TLS MCP connection.
+
+[**⬇ Download the latest signed APK**](https://github.com/olafkfreund/lxconnect/releases/latest) · [Source on GitHub](https://github.com/olafkfreund/lxconnect)
 
 ## Features
 - **MCP Server:** Exposes Android capabilities (Files, Notifications, Intents, Apps) to your Linux environment.
@@ -35,3 +37,12 @@ nix run github:olafkfreund/lxconnect#gui
 1. **Android App:** Runs a Ktor MCP Server on port 8080. Connects to `NotificationListenerService` and `PackageManager` to bypass Android sandboxes.
 2. **Daemon CLI:** A Python HTTP daemon (`lxconnect daemon`) that reads Server-Sent Events (SSE) from the Android app and integrates with `libnotify` for Linux desktop notifications.
 3. **Secure Transport:** TLS is terminated on-device by a Conscrypt `SSLServerSocket`; the daemon pins the phone's self-signed certificate, whose fingerprint is exchanged at pairing time.
+
+## Blog
+
+<ul>
+{% for post in site.posts %}
+  <li><a href="{{ post.url | relative_url }}">{{ post.title }}</a> <em>({{ post.date | date: "%Y-%m-%d" }})</em></li>
+{% endfor %}
+</ul>
+
