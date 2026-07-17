@@ -17,9 +17,7 @@
           };
         };
 
-        pythonEnv = pkgs.python3.withPackages (ps: with ps; [
-          pygobject3
-        ]);
+        pythonEnv = pkgs.python3;
 
         androidComposition = pkgs.androidenv.composeAndroidPackages {
           cmdLineToolsVersion = "11.0";
@@ -38,13 +36,10 @@
           src = ./.;
 
           nativeBuildInputs = [
-            pkgs.wrapGAppsHook4
-            pkgs.gobject-introspection
             pkgs.makeWrapper
           ];
 
           buildInputs = [
-            pkgs.gtk4
             pythonEnv
             pkgs.libnotify
             pkgs.qrencode
@@ -55,7 +50,6 @@
             mkdir -p $out/bin $out/share/lxconnect
             
             cp daemon/main.py $out/share/lxconnect/main.py
-            cp daemon/gui.py $out/share/lxconnect/gui.py
             
             # CLI wrapper
             cat > $out/bin/lxconnect <<EOF
@@ -63,14 +57,7 @@
             exec ${pythonEnv}/bin/python $out/share/lxconnect/main.py "\$@"
             EOF
             
-            # GUI wrapper
-            cat > $out/bin/lxconnect-gui <<EOF
-            #!/bin/sh
-            exec ${pythonEnv}/bin/python $out/share/lxconnect/gui.py "\$@"
-            EOF
-            
             chmod +x $out/bin/lxconnect
-            chmod +x $out/bin/lxconnect-gui
           '';
 
           postFixup = ''
@@ -93,10 +80,7 @@
           '';
         };
 
-        apps = {
-          default = flake-utils.lib.mkApp { drv = self.packages.${system}.default; exePath = "/bin/lxconnect"; };
-          gui = flake-utils.lib.mkApp { drv = self.packages.${system}.default; exePath = "/bin/lxconnect-gui"; };
-        };
+        apps.default = flake-utils.lib.mkApp { drv = self.packages.${system}.default; exePath = "/bin/lxconnect"; };
       }
     );
 }
