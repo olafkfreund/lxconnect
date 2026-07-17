@@ -21,8 +21,10 @@ expected_secret = None
 pairing_result = None
 
 def get_connection_details():
-    url = "https://localhost:8085/"
-    token = "test-key-999"
+    # No usable defaults: an unpaired daemon fails closed in _require_fingerprint()
+    # before url/token are ever used, so there's nothing sensible to guess here.
+    url = None
+    token = None
     fingerprint = None
     if os.path.exists(CONFIG_FILE):
         try:

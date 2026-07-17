@@ -26,7 +26,7 @@ def on_activate(app):
     box.append(status_lbl)
 
     if get_active_endpoint():
-        status_lbl.set_markup("<span foreground='green'>✅ Connected to Waydroid</span>")
+        status_lbl.set_markup("<span foreground='green'>✅ Connected</span>")
     else:
         status_lbl.set_markup("<span foreground='red'>❌ Daemon not running!</span>")
 
