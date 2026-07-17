@@ -40,6 +40,7 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "/META-INF/INDEX.LIST"
             excludes += "/META-INF/io.netty.versions.properties"
+            excludes += "/META-INF/versions/9/OSGI-INF/MANIFEST.MF" // duplicated across bouncycastle jars
         }
     }
 }
@@ -65,6 +66,9 @@ dependencies {
 
     // Model Context Protocol SDK
     implementation("io.modelcontextprotocol:kotlin-sdk:0.13.0")
+
+    // Self-signed TLS cert generation (X509v3 builder) for the on-device HTTPS server
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.80")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")

@@ -9,29 +9,48 @@
   outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
-        
+        pkgs = import nixpkgs {
+          inherit system;
+          config = {
+            allowUnfree = true;
+            android_sdk.accept_license = true;
+          };
+        };
+
         pythonEnv = pkgs.python3.withPackages (ps: with ps; [
           pygobject3
         ]);
+
+        androidComposition = pkgs.androidenv.composeAndroidPackages {
+          cmdLineToolsVersion = "11.0";
+          platformToolsVersion = "37.0.0";
+          buildToolsVersions = [ "34.0.0" ];
+          platformVersions = [ "34" ];
+          abiVersions = [ ]; # No emulator system images (reduces download size significantly)
+          includeEmulator = false;
+          includeSystemImages = false;
+          includeNDK = false;
+        };
       in
       {
         packages.default = pkgs.stdenv.mkDerivation {
           name = "lxconnect";
           src = ./.;
-          
-          nativeBuildInputs = [ 
-            pkgs.wrapGAppsHook4 
-            pkgs.gobject-introspection 
+
+          nativeBuildInputs = [
+            pkgs.wrapGAppsHook4
+            pkgs.gobject-introspection
             pkgs.makeWrapper
           ];
-          
-          buildInputs = [ 
-            pkgs.gtk4 
-            pythonEnv 
-            pkgs.libnotify 
+
+          buildInputs = [
+            pkgs.gtk4
+            pythonEnv
+            pkgs.libnotify
+            pkgs.qrencode
+            pkgs.zenity # inline-reply prompt for desktop notification actions
           ];
-          
+
           installPhase = ''
             mkdir -p $out/bin $out/share/lxconnect
             
@@ -53,18 +72,25 @@
             chmod +x $out/bin/lxconnect
             chmod +x $out/bin/lxconnect-gui
           '';
-          
+
           postFixup = ''
-            # Make sure the CLI can find notify-send
+            # Make sure the CLI can find notify-send, qrencode and zenity
             wrapProgram $out/bin/lxconnect \
-              --prefix PATH : "${pkgs.libnotify}/bin"
+              --prefix PATH : "${pkgs.libnotify}/bin:${pkgs.qrencode}/bin:${pkgs.zenity}/bin"
           '';
         };
 
         devShells.default = pkgs.mkShell {
           buildInputs = [
             self.packages.${system}.default
+            androidComposition.androidsdk
+            pkgs.jdk17 # Matches compileOptions target in build.gradle
           ];
+          shellHook = ''
+            export ANDROID_HOME="${androidComposition.androidsdk}/libexec/android-sdk"
+            export ANDROID_SDK_ROOT="$ANDROID_HOME"
+            export JAVA_HOME="${pkgs.jdk17.home}"
+          '';
         };
 
         apps = {

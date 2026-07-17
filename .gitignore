@@ -8,3 +8,13 @@ devenv.local.yaml
 
 # pre-commit
 .pre-commit-config.yaml
+
+# Build output & local machine state
+.gradle/
+build/
+app/build/
+.kotlin/
+.android/
+local.properties
+__pycache__/
+logcat_dump*.txt
