@@ -12,6 +12,7 @@ layout: default
 - **Background Daemon:** Lightning fast SSE stream bridging Android OS and NixOS.
 - **Accessibility Control:** Drive arbitrary app UIs — tap, swipe, type, read the screen.
 - **GTK4 Desktop Client:** A native Linux app to drive every feature and run a full self-test suite against the phone.
+- **Automations:** Trigger-based rules — when a matching notification arrives (by app/title/text), ring the phone, reply, or fire any tool. Plus `lxconnect triage` to summarize notifications by app.
 - **Secure by Default:** HTTPS with a pinned self-signed certificate, paired over a QR code.
 
 ## Usage

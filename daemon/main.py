@@ -161,6 +161,7 @@ def listen_daemon():
                                     key = params.get("key", "")
                                     print(f"🔔 Incoming Notification! Key: {key}")
                                     notify_with_reply(title, text, pkg, key)
+                                    _run_automations({"package": pkg, "title": title, "text": text, "key": key})
                                 elif "result" in msg:
                                     # It's an async response to a CLI tool execution
                                     content = msg["result"].get("content", [])
@@ -336,6 +337,56 @@ def do_pair():
     else:
         print("Pairing failed or timed out.")
 
+def _run_automations(notif):
+    try:
+        import automations
+        for name, action in automations.process(notif, automations.load_rules(), call_tool, notify_desktop):
+            print(f"⚙ Automation '{name}' → {action}")
+    except Exception as e:
+        print(f"Automation error: {e}")
+
+
+def do_rules():
+    import automations
+    rules = automations.load_rules()
+    if not rules:
+        print(f"No automation rules. Create {automations.RULES_FILE} (see the module docstring for the format).")
+        return
+    for r in rules:
+        print(f"• {r.get('name', '(unnamed)')}: match={r.get('match', {})} → {len(r.get('actions', []))} action(s)")
+
+
+def do_triage():
+    from mcp_client import MCPClient
+    from collections import defaultdict
+    client = MCPClient()
+    client.start()
+    try:
+        r = client.call("list_notifications", {}, timeout=20)
+    except Exception as e:
+        print(f"Failed to fetch notifications: {e}")
+        sys.exit(1)
+    text = r.get("text", "")
+    if not text or text.startswith("No active"):
+        print("No active notifications.")
+        return
+    groups = defaultdict(list)
+    for block in text.split("\n\n"):
+        app = title = ""
+        for line in block.splitlines():
+            if line.startswith("App: "):
+                app = line[5:].strip()
+            elif line.startswith("Title: "):
+                title = line[7:].strip()
+        if app:
+            groups[app].append(title)
+    total = sum(len(v) for v in groups.values())
+    print(f"{total} notifications across {len(groups)} apps:")
+    for app, titles in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        shown = ", ".join(t for t in titles if t)[:80]
+        print(f"  {app}: {len(titles)}" + (f" — {shown}" if shown else ""))
+
+
 def send_file(args):
     if not os.path.exists(args.filepath):
         raise RuntimeError(f"File not found: {args.filepath}")
@@ -372,6 +423,8 @@ def main():
         (("text",), {"help": "The reply message"}))
     cmd("list-notifications", "List all currently active Android notifications",
         lambda a: call_tool("list_notifications", {}))
+    cmd("rules", "List configured automation rules", lambda a: do_rules())
+    cmd("triage", "Summarize active notifications grouped by app", lambda a: do_triage())
     cmd("list-apps", "List all installed apps on the Android device",
         lambda a: call_tool("list_installed_apps", {}))
     cmd("search-contacts", "Search contacts on the Android device",
