@@ -17,7 +17,9 @@
           };
         };
 
-        pythonEnv = pkgs.python3;
+        pythonEnv = pkgs.python3.withPackages (ps: with ps; [
+          pygobject3 # GTK4 desktop client (gui.py)
+        ]);
 
         androidComposition = pkgs.androidenv.composeAndroidPackages {
           cmdLineToolsVersion = "11.0";
@@ -36,35 +38,48 @@
           src = ./.;
 
           nativeBuildInputs = [
+            pkgs.wrapGAppsHook4
+            pkgs.gobject-introspection
             pkgs.makeWrapper
           ];
 
           buildInputs = [
             pythonEnv
+            pkgs.gtk4
             pkgs.libnotify
             pkgs.qrencode
             pkgs.zenity # inline-reply prompt for desktop notification actions
             pkgs.openssl # ephemeral cert for the HTTPS pairing server
           ];
 
+          # Wrap manually (below) so the CLI gets tool PATHs and the GUI gets both
+          # tool PATHs and the GObject/GTK env (gappsWrapperArgs).
+          dontWrapGApps = true;
+
           installPhase = ''
             mkdir -p $out/bin $out/share/lxconnect
-            
-            cp daemon/main.py $out/share/lxconnect/main.py
-            
-            # CLI wrapper
+            cp daemon/main.py daemon/mcp_client.py daemon/gui.py $out/share/lxconnect/
+
             cat > $out/bin/lxconnect <<EOF
             #!/bin/sh
             exec ${pythonEnv}/bin/python $out/share/lxconnect/main.py "\$@"
             EOF
-            
-            chmod +x $out/bin/lxconnect
+
+            cat > $out/bin/lxconnect-gui <<EOF
+            #!/bin/sh
+            exec ${pythonEnv}/bin/python $out/share/lxconnect/gui.py "\$@"
+            EOF
+
+            chmod +x $out/bin/lxconnect $out/bin/lxconnect-gui
           '';
 
           postFixup = ''
-            # Make sure the CLI can find notify-send, qrencode and zenity
             wrapProgram $out/bin/lxconnect \
               --prefix PATH : "${pkgs.libnotify}/bin:${pkgs.qrencode}/bin:${pkgs.zenity}/bin:${pkgs.openssl}/bin"
+
+            wrapProgram $out/bin/lxconnect-gui \
+              --prefix PATH : "${pkgs.libnotify}/bin:${pkgs.qrencode}/bin:${pkgs.zenity}/bin:${pkgs.openssl}/bin" \
+              "''${gappsWrapperArgs[@]}"
           '';
         };
 
@@ -81,7 +96,10 @@
           '';
         };
 
-        apps.default = flake-utils.lib.mkApp { drv = self.packages.${system}.default; exePath = "/bin/lxconnect"; };
+        apps = {
+          default = flake-utils.lib.mkApp { drv = self.packages.${system}.default; exePath = "/bin/lxconnect"; };
+          gui = flake-utils.lib.mkApp { drv = self.packages.${system}.default; exePath = "/bin/lxconnect-gui"; };
+        };
       }
     );
 }

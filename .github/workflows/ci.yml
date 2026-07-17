@@ -21,7 +21,7 @@ jobs:
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
   daemon:
-    name: Compile daemon
+    name: Compile & test daemon
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +29,9 @@ jobs:
         with:
           python-version: "3"
       - name: py_compile
-        run: python -m py_compile daemon/main.py
+        run: python -m py_compile daemon/main.py daemon/mcp_client.py daemon/gui.py daemon/test_mcp_client.py
+      - name: unit tests
+        run: cd daemon && python -m unittest test_mcp_client -v
 
   flake:
     name: Flake check

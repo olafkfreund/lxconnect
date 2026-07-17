@@ -11,6 +11,7 @@ layout: default
 - **Deep Integration:** Open Android deep links natively (`mailto:`, `spotify:`), control Android apps, read Android system status.
 - **Background Daemon:** Lightning fast SSE stream bridging Android OS and NixOS.
 - **Accessibility Control:** Drive arbitrary app UIs — tap, swipe, type, read the screen.
+- **GTK4 Desktop Client:** A native Linux app to drive every feature and run a full self-test suite against the phone.
 - **Secure by Default:** HTTPS with a pinned self-signed certificate, paired over a QR code.
 
 ## Usage
@@ -23,6 +24,9 @@ nix run github:olafkfreund/lxconnect -- pair
 
 # Run the background daemon that bridges phone notifications to your desktop
 nix run github:olafkfreund/lxconnect -- daemon
+
+# Or launch the GTK desktop client (drive every feature + run a self-test suite)
+nix run github:olafkfreund/lxconnect#gui
 ```
 
 ## Architecture
