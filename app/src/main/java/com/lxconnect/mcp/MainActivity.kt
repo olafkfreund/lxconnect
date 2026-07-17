@@ -82,6 +82,13 @@ class MainActivity : AppCompatActivity() {
         }
         rootLayout.addView(btnAccessibilityAccess, layoutParams)
 
+        val btnBattery = Button(this).apply {
+            text = "Disable Battery Optimization"
+            setPadding(20, 20, 20, 20)
+            setOnClickListener { requestBatteryExemption() }
+        }
+        rootLayout.addView(btnBattery, layoutParams)
+
         val btnStartService = Button(this).apply {
             text = "3. Start MCP Server Service"
             setPadding(20, 20, 20, 20)
@@ -103,7 +110,8 @@ class MainActivity : AppCompatActivity() {
         val hasNotificationListener = isNotificationServiceEnabled()
         val key = getSecureSharedKey()
 
-        statusText.text = "Pairing Key: $key\nPort: 8080\n\nSMS Read/Send Permission: ${if (hasSms) "GRANTED" else "MISSING"}\nNotification Access: ${if (hasNotificationListener) "GRANTED" else "MISSING"}"
+        val batteryOk = isIgnoringBatteryOptimizations()
+        statusText.text = "Pairing Key: $key\nPort: 8080\n\nSMS Read/Send Permission: ${if (hasSms) "GRANTED" else "MISSING"}\nNotification Access: ${if (hasNotificationListener) "GRANTED" else "MISSING"}\nBattery Optimization: ${if (batteryOk) "DISABLED (good)" else "ON (may kill server)"}"
     }
 
     private fun requestSmsAndCallPermissions() {
@@ -137,6 +145,30 @@ class MainActivity : AppCompatActivity() {
             startActivity(intent)
         } catch (e: Exception) {
             Toast.makeText(this, "Failed to open settings: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        val pm = getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+        return pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    // Aggressive OEMs kill foreground services unless the app is battery-optimization exempt.
+    private fun requestBatteryExemption() {
+        if (isIgnoringBatteryOptimizations()) {
+            Toast.makeText(this, "Battery optimization already disabled", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = android.net.Uri.parse("package:$packageName")
+            })
+        } catch (e: Exception) {
+            try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (e2: Exception) {
+                Toast.makeText(this, "Could not open battery settings", Toast.LENGTH_LONG).show()
+            }
         }
     }
 

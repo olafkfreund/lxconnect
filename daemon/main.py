@@ -124,15 +124,16 @@ def notify_with_reply(title, text, pkg, key):
     threading.Thread(target=worker, daemon=True).start()
 
 def listen_daemon():
-    url, headers, fingerprint = get_connection_details()
-    _require_fingerprint(fingerprint)
-    opener = _pinned_opener(fingerprint)
-    print(f"Starting lxconnect daemon. Connecting to {url}...")
+    print("Starting lxconnect daemon...")
     while True:
         try:
+            # Re-read config each reconnect so re-pairing is picked up without a restart.
+            url, headers, fingerprint = get_connection_details()
+            _require_fingerprint(fingerprint)
+            opener = _pinned_opener(fingerprint)
             req = Request(url, headers=headers)
             with opener.open(req) as response:
-                print("--- Connected to Android MCP Stream ---")
+                print(f"--- Connected to Android MCP Stream ({url}) ---")
                 notify_desktop("lxconnect", "Connected to Android device successfully!")
                 current_event = None
                 for line in response:
