@@ -7,6 +7,7 @@ import argparse
 import subprocess
 import socket
 import secrets
+import tempfile
 import threading
 import ssl
 import hashlib
@@ -236,13 +237,35 @@ class PairingHandler(BaseHTTPRequestHandler):
         self.send_response(400)
         self.end_headers()
 
-def run_pairing_server(secret, port=8086):
+def _generate_pair_cert():
+    # Ephemeral self-signed cert for the one-shot HTTPS pairing server. The phone
+    # pins its fingerprint (carried in the QR), so the private key never leaves this
+    # machine and the shared secret is never sent in cleartext.
+    d = tempfile.mkdtemp(prefix="lxconnect-pair-")
+    cert_file = os.path.join(d, "cert.pem")
+    key_file = os.path.join(d, "key.pem")
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+         "-keyout", key_file, "-out", cert_file, "-days", "1",
+         "-subj", "/CN=lxconnect-pair"],
+        check=True, capture_output=True,
+    )
+    der = subprocess.run(
+        ["openssl", "x509", "-in", cert_file, "-outform", "DER"],
+        check=True, capture_output=True,
+    ).stdout
+    return cert_file, key_file, hashlib.sha256(der).hexdigest()
+
+def run_pairing_server(secret, cert_file, key_file, port=8086):
     global expected_secret, pairing_result
     expected_secret = secret
     pairing_result = None
-    
+
     server = HTTPServer(('0.0.0.0', port), PairingHandler)
-    
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert_file, key_file)
+    server.socket = ctx.wrap_socket(server.socket, server_side=True)
+
     import select
     start_time = time.time()
     while pairing_result is None:
@@ -271,7 +294,12 @@ def do_pair():
     secret = secrets.token_hex(16)
     port = 8086
     local_ip = get_local_ip()
-    pair_url = f"lxconnect://pair?ip={local_ip}&port={port}&secret={secret}"
+    try:
+        cert_file, key_file, pair_fp = _generate_pair_cert()
+    except Exception as e:
+        print(f"Failed to generate pairing certificate (is openssl installed?): {e}")
+        sys.exit(1)
+    pair_url = f"lxconnect://pair?ip={local_ip}&port={port}&secret={secret}&pairFp={pair_fp}"
     
     print("=============================================================")
     print("                      lxconnect Pairing                      ")
@@ -290,7 +318,7 @@ def do_pair():
     print("")
     print("Waiting for connection from mobile device (60s timeout)...")
     
-    result = run_pairing_server(secret, port)
+    result = run_pairing_server(secret, cert_file, key_file, port)
     if result:
         os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
         with open(CONFIG_FILE, "w") as f:

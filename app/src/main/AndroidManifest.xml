@@ -26,7 +26,6 @@
         android:allowBackup="true"
         android:label="lxconnect MCP Server"
         android:supportsRtl="true"
-        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.lxconnect">
 
         <activity
