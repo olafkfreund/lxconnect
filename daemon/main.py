@@ -9,6 +9,7 @@ import socket
 import secrets
 import tempfile
 import threading
+import hmac
 import ssl
 import hashlib
 import http.client
@@ -217,10 +218,9 @@ class PairingHandler(BaseHTTPRequestHandler):
                 received_secret = data.get("secret")
                 device_name = data.get("deviceName", "Android Device")
                 cert_fingerprint = data.get("certFingerprint")
-                if received_secret == expected_secret:
-                    client_ip = data.get("ip") or self.client_address[0]
-                    if not client_ip or client_ip in ("127.0.0.1", "localhost"):
-                        client_ip = self.client_address[0]
+                if received_secret is not None and hmac.compare_digest(received_secret, expected_secret):
+                    # Trust the real TCP peer address, never the client-supplied "ip".
+                    client_ip = self.client_address[0]
                     pairing_result = {
                         "ip": client_ip,
                         "port": 8080,
@@ -321,8 +321,11 @@ def do_pair():
     
     result = run_pairing_server(secret, cert_file, key_file, port)
     if result:
-        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-        with open(CONFIG_FILE, "w") as f:
+        os.makedirs(os.path.dirname(CONFIG_FILE), mode=0o700, exist_ok=True)
+        os.chmod(os.path.dirname(CONFIG_FILE), 0o700)
+        # Config holds the bearer token — write it 0600 so other local users can't read it.
+        fd = os.open(CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(result, f, indent=4)
         print("=============================================================")
         print("                   Pairing Successful!                       ")

@@ -215,7 +215,7 @@ class MainActivity : AppCompatActivity() {
             val secret = data.getQueryParameter("secret")
             val pairFp = data.getQueryParameter("pairFp")
             if (ip != null && port != null && secret != null && pairFp != null) {
-                pairWithLinux(ip, port, secret, pairFp)
+                confirmAndPair(ip, port, secret, pairFp)
             }
         }
     }
@@ -237,6 +237,19 @@ class MainActivity : AppCompatActivity() {
             android.util.Log.e("Pairing", "Failed to get local IP address", ex)
         }
         return null
+    }
+
+    // Require an explicit user tap before accepting a pairing intent. Without this a
+    // rogue app could fire lxconnect://pair and silently overwrite the server's bearer
+    // key with an attacker-known value (no permission needed to send a VIEW intent).
+    private fun confirmAndPair(ip: String, port: String, secret: String, pairFp: String) {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Pair this phone?")
+            .setMessage("A computer at $ip wants to pair with lxconnect. This grants it full control of your phone — SMS, contacts, camera, screen. Only accept if you just started pairing from that computer.")
+            .setPositiveButton("Pair") { _, _ -> pairWithLinux(ip, port, secret, pairFp) }
+            .setNegativeButton("Cancel", null)
+            .setCancelable(false)
+            .show()
     }
 
     // Trusts only the pairing server whose leaf cert SHA-256 matches the fingerprint

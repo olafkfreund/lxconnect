@@ -27,6 +27,10 @@ class TlsProxy(
 
     private val serverSocket: SSLServerSocket
     @Volatile private var running = true
+    // Bound concurrent connections to prevent pre-auth resource exhaustion (TLS
+    // completes before the Ktor token check). No read timeout: the SSE stream is
+    // long-idle by design, so a soTimeout would kill legitimate connections.
+    private val connectionLimit = java.util.concurrent.Semaphore(MAX_CONNECTIONS)
 
     init {
         val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
@@ -53,19 +57,28 @@ class TlsProxy(
     }
 
     private fun handle(client: Socket) {
+        if (!connectionLimit.tryAcquire()) {
+            Log.w(TAG, "connection limit reached; rejecting")
+            try { client.close() } catch (_: Exception) {}
+            return
+        }
         val upstream = try {
             Socket("127.0.0.1", targetPort)
         } catch (e: Exception) {
             Log.e(TAG, "upstream connect failed", e)
+            connectionLimit.release()
             try { client.close() } catch (_: Exception) {}
             return
         }
-        pipe(client, upstream) // request bytes
-        pipe(upstream, client) // response / SSE stream
+        // Release the permit once both directions have finished.
+        val open = java.util.concurrent.atomic.AtomicInteger(2)
+        val onDone = { if (open.decrementAndGet() == 0) connectionLimit.release() }
+        pipe(client, upstream, onDone) // request bytes
+        pipe(upstream, client, onDone) // response / SSE stream
     }
 
     // One-way copy on its own daemon thread; closing either end tears down both.
-    private fun pipe(from: Socket, to: Socket) {
+    private fun pipe(from: Socket, to: Socket, onDone: () -> Unit) {
         thread(isDaemon = true) {
             try {
                 from.getInputStream().copyTo(to.getOutputStream(), 8192)
@@ -73,6 +86,7 @@ class TlsProxy(
             } finally {
                 try { from.close() } catch (_: Exception) {}
                 try { to.close() } catch (_: Exception) {}
+                onDone()
             }
         }
     }
@@ -82,5 +96,8 @@ class TlsProxy(
         try { serverSocket.close() } catch (_: Exception) {}
     }
 
-    companion object { private const val TAG = "LxTlsProxy" }
+    companion object {
+        private const val TAG = "LxTlsProxy"
+        private const val MAX_CONNECTIONS = 32
+    }
 }
