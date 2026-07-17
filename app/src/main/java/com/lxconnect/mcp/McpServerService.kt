@@ -40,12 +40,12 @@ class McpServerService : Service() {
     private var serverEngine: EmbeddedServer<*, *>? = null
     private var mcpServer: Server? = null
 
-    // For testing, we hardcode a pairing key
-    private val secureSharedKey = "test-key-999"
+    private var secureSharedKey = ""
 
     override fun onCreate() {
         super.onCreate()
         instance = this
+        secureSharedKey = McpApplication.getSharedKey(this)
         startForegroundService()
         startMcpServer()
     }
@@ -74,36 +74,37 @@ class McpServerService : Service() {
 
         val notification: Notification = NotificationCompat.Builder(this, McpApplication.CHANNEL_ID)
             .setContentTitle("lxconnect MCP Server Running")
-            .setContentText("Listening on port 8080. Pairing Key: $secureSharedKey")
+            .setContentText("Listening on port 8080")
             .setSmallIcon(android.R.drawable.stat_sys_phone_call)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
     }
 
     private fun startMcpServer() {
-        // Inspect ClientConnection class fields and methods
-        try {
-            val connClass = Class.forName("io.modelcontextprotocol.kotlin.sdk.server.ClientConnection")
-            Log.i("McpInspect", "--- CLIENTCONNECTION CLASS FIELDS ---")
-            connClass.declaredFields.forEach {
-                Log.i("McpInspect", "Field: ${it.name} (${it.type.name})")
-            }
-            Log.i("McpInspect", "--- CLIENTCONNECTION CLASS METHODS ---")
-            connClass.declaredMethods.forEach {
-                Log.i("McpInspect", "Method: ${it.name} returns ${it.returnType.name}")
-            }
-        } catch (e: Exception) {
-            Log.e("McpInspect", "Failed to inspect ClientConnection class", e)
-        }
+        // HTTPS only: self-signed cert generated on first run (see McpApplication), reused
+        // across restarts. No plaintext connector.
+        val keyStore = McpApplication.getTlsKeyStore(this)
+        val keyStorePassword = McpApplication.getTlsKeystorePasswordChars(this)
+        val environment = applicationEnvironment {}
 
-        serverEngine = embeddedServer(Netty, port = 8080) {
+        serverEngine = embeddedServer(Netty, environment, configure = {
+            sslConnector(
+                keyStore = keyStore,
+                keyAlias = McpApplication.TLS_KEY_ALIAS,
+                keyStorePassword = { keyStorePassword },
+                privateKeyPassword = { keyStorePassword }
+            ) {
+                port = 8080
+                host = "0.0.0.0"
+            }
+        }) {
             // Install Ktor SSE Plugin (required by MCP SDK for SSE transport routing)
             install(io.ktor.server.sse.SSE)
 
@@ -123,7 +124,7 @@ class McpServerService : Service() {
                 }
             }
         }.start(wait = false)
-        Log.i(TAG, "Ktor Netty Server started on port 8080")
+        Log.i(TAG, "Ktor Netty Server started (HTTPS) on port 8080")
     }
 
     private fun createMcpServerInstance(): Server {
@@ -154,23 +155,6 @@ class McpServerService : Service() {
                 }
             }
             CallToolResult(content = listOf(TextContent(text = text)))
-        }
-
-        // Tool 1: get_active_notifications
-        server.addTool(
-            name = "get_active_notifications",
-            description = "Get a list of currently active Android notifications.",
-            inputSchema = ToolSchema(properties = buildJsonObject {})
-        ) {
-            val notifications = CustomNotificationListener.getActiveNotifications()
-            val textContent = if (notifications.isEmpty()) {
-                "No active notifications."
-            } else {
-                notifications.joinToString("\n---\n") { 
-                    "App: ${it["packageName"]}\nKey: ${it["key"]}\nTitle: ${it["title"]}\nText: ${it["text"]}" 
-                }
-            }
-            CallToolResult(content = listOf(TextContent(text = textContent)))
         }
 
         // Tool 2: reply_to_notification
@@ -527,6 +511,79 @@ class McpServerService : Service() {
             }
         }
 
+        // Tool 20: list_installed_apps
+        server.addTool(
+            name = "list_installed_apps",
+            description = "List all installed applications on the device with their package names and labels.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {},
+                required = emptyList()
+            )
+        ) {
+            val pm = packageManager
+            val packages = pm.getInstalledPackages(0)
+            val list = packages.mapNotNull { pkg ->
+                try {
+                    val appInfo = pkg.applicationInfo
+                    val isSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
+                    val label = pm.getApplicationLabel(appInfo).toString()
+                    val packageName = pkg.packageName
+                    "$label ($packageName)${if (isSystem) " [SYSTEM]" else ""}"
+                } catch (e: Exception) {
+                    null
+                }
+            }.sorted()
+            val text = if (list.isEmpty()) {
+                "No apps found."
+            } else {
+                list.joinToString("\n")
+            }
+            CallToolResult(content = listOf(TextContent(text = text)))
+        }
+
+        // Tool 21: search_contacts
+        server.addTool(
+            name = "search_contacts",
+            description = "Search contacts by name to retrieve their phone numbers.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("query") {
+                        put("type", "string")
+                        put("description", "Name or partial name of the contact to search for.")
+                    }
+                },
+                required = listOf("query")
+            )
+        ) { request ->
+            val query = request.params.arguments?.get("query").asString("query")
+            val list = mutableListOf<String>()
+            try {
+                val uri = android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+                val projection = arrayOf(
+                    android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                    android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER
+                )
+                val selection = "${android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?"
+                val selectionArgs = arrayOf("%$query%")
+                val cursor = contentResolver.query(uri, projection, selection, selectionArgs, null)
+                cursor?.use {
+                    while (it.moveToNext()) {
+                        val name = it.getString(0) ?: "Unknown"
+                        val number = it.getString(1) ?: "No Number"
+                        list.add("$name: $number")
+                    }
+                }
+                val resultText = if (list.isEmpty()) {
+                    "No contacts found matching '$query'."
+                } else {
+                    list.distinct().joinToString("\n")
+                }
+                CallToolResult(content = listOf(TextContent(text = resultText)))
+            } catch (e: Exception) {
+                CallToolResult(content = listOf(TextContent(text = "Failed to search contacts: ${e.message}")), isError = true)
+            }
+        }
+
         val baseDownloadDir = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "lxconnect")
         if (baseDownloadDir != null && !baseDownloadDir.exists()) {
             baseDownloadDir.mkdirs()
@@ -662,36 +719,7 @@ class McpServerService : Service() {
             }
         }
 
-        // Tool 19: debug_mock_notification
-        server.addTool(
-            name = "debug_mock_notification",
-            description = "Post a mock notification with a reply action for testing",
-            inputSchema = ToolSchema(properties = buildJsonObject {})
-        ) {
-            val replyLabel = "Reply here"
-            val remoteInput = android.app.RemoteInput.Builder("reply_key").setLabel(replyLabel).build()
-            
-            val resultIntent = Intent(this@McpServerService, MainActivity::class.java)
-            val pendingIntent = android.app.PendingIntent.getActivity(
-                this@McpServerService, 0, resultIntent, 
-                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_MUTABLE
-            )
-            
-            val action = android.app.Notification.Action.Builder(
-                android.R.drawable.ic_menu_send, "Reply", pendingIntent
-            ).addRemoteInput(remoteInput).build()
-            
-            val builder = android.app.Notification.Builder(this@McpServerService, "mcp_service_channel")
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle("👻 Snapchat")
-                .setContentText("Hey! Are you there? (Mock Message)")
-                .addAction(action)
-                
-            val notificationManager = getSystemService(android.app.NotificationManager::class.java)
-            notificationManager.notify(999, builder.build())
-            
-            CallToolResult(content = listOf(TextContent(text = "Mock notification posted! Check your Linux desktop!")))
-        }
+        server.registerAccessibilityTools(this@McpServerService)
 
         return server
     }
@@ -721,31 +749,30 @@ class McpServerService : Service() {
         }
     }
 
+    // Uses the SDK's public CustomNotification type (notifications/* extension mechanism) and
+    // ServerSession.notification(), a public method inherited from Protocol. No reflection needed.
     fun broadcastNotification(key: String, packageName: String, title: String, text: String) {
         serviceScope.launch {
             try {
                 mcpServer?.let { server ->
                     val sessions = server.sessions
                     if (sessions.isNotEmpty()) {
-                        val params = buildJsonObject {
+                        val meta = buildJsonObject {
                             put("key", key)
                             put("packageName", packageName)
                             put("title", title)
                             put("text", text)
                             put("time", System.currentTimeMillis())
                         }
-                        
+                        val notification = CustomNotification(
+                            method = Method.Custom("notifications/phone_notification"),
+                            params = BaseNotificationParams(meta = meta)
+                        )
+
                         sessions.values.forEach { session ->
                             try {
-                                val conn = connField?.get(session)
-                                if (conn != null) {
-                                    if (notificationMethod == null) {
-                                        notificationMethod = conn.javaClass.methods.find { it.name == "notification" && it.parameterCount == 2 }
-                                        notificationMethod?.isAccessible = true
-                                    }
-                                    notificationMethod?.invoke(conn, "notifications/phone_notification", params)
-                                    Log.d(TAG, "Successfully pushed notification to client session.")
-                                }
+                                session.notification(notification)
+                                Log.d(TAG, "Successfully pushed notification to client session.")
                             } catch (e: Exception) {
                                 Log.e(TAG, "Error pushing notification to session", e)
                             }
@@ -762,16 +789,6 @@ class McpServerService : Service() {
         private const val TAG = "McpServerService"
         private const val NOTIFICATION_ID = 42
         private var activeRingtone: android.media.Ringtone? = null
-
-        private val connField by lazy {
-            try {
-                val sessionClass = Class.forName("io.modelcontextprotocol.kotlin.sdk.server.ServerSession")
-                val field = sessionClass.declaredFields.find { it.name == "clientConnection" || it.name.endsWith("clientConnection") }
-                field?.isAccessible = true
-                field
-            } catch (e: Exception) { null }
-        }
-        private var notificationMethod: java.lang.reflect.Method? = null
 
         @Volatile
         var instance: McpServerService? = null
