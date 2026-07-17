@@ -24,7 +24,7 @@
 
     <application
         android:name=".McpApplication"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:label="lxconnect MCP Server"
         android:supportsRtl="true"
         android:theme="@style/Theme.lxconnect">

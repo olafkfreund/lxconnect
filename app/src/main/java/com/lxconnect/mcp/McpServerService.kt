@@ -102,8 +102,9 @@ class McpServerService : Service() {
 
             // Install simple auth interceptor
             intercept(ApplicationCallPipeline.Plugins) {
-                val authHeader = call.request.headers["Authorization"]
-                if (authHeader != "Bearer $secureSharedKey") {
+                val provided = (call.request.headers["Authorization"] ?: "").toByteArray()
+                val expected = "Bearer $secureSharedKey".toByteArray()
+                if (!java.security.MessageDigest.isEqual(provided, expected)) {
                     call.respond(HttpStatusCode.Unauthorized, "Unauthorized: Invalid or missing shared key.")
                     finish()
                 }
@@ -220,7 +221,7 @@ class McpServerService : Service() {
                 required = emptyList()
             )
         ) { request ->
-            val limit = request.params.arguments?.get("limit")?.jsonPrimitive?.int ?: 10
+            val limit = (request.params.arguments?.get("limit")?.jsonPrimitive?.int ?: 10).coerceIn(0, 1000)
             val list = mutableListOf<String>()
 
             try {
@@ -629,10 +630,14 @@ class McpServerService : Service() {
                 throw IllegalArgumentException("Invalid filename")
             }
 
-            val targetFile = File(baseDownloadDir, fileName)
-            val bytes = Base64.decode(base64Data, Base64.DEFAULT)
-            targetFile.writeBytes(bytes)
-            CallToolResult(content = listOf(TextContent(text = "File successfully written to ${targetFile.absolutePath}")))
+            try {
+                val targetFile = File(baseDownloadDir, fileName)
+                val bytes = Base64.decode(base64Data, Base64.DEFAULT)
+                targetFile.writeBytes(bytes)
+                CallToolResult(content = listOf(TextContent(text = "File successfully written to ${targetFile.absolutePath}")))
+            } catch (e: Exception) {
+                CallToolResult(content = listOf(TextContent(text = "Failed to write file: ${e.message}")), isError = true)
+            }
         }
 
         // Tool 17: get_file
