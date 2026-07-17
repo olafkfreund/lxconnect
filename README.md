@@ -10,6 +10,7 @@ server**, so the client on the other end can be a CLI, a GTK app, or a language
 model.
 
 [Website](https://olafkfreund.github.io/lxconnect/) ·
+[Documentation](https://olafkfreund.github.io/lxconnect/documentation.html) ·
 [Releases](https://github.com/olafkfreund/lxconnect/releases/latest) ·
 [Blog post](https://olafkfreund.github.io/lxconnect/2026/07/17/building-lxconnect.html)
 
@@ -23,7 +24,7 @@ Three components:
 | --- | --- |
 | Android app | Runs an on-device MCP server exposing ~24 typed tools plus an AccessibilityService for driving arbitrary app UIs. |
 | Python daemon | Bridges the phone to the desktop — notification mirroring, inline reply, tool dispatch, and trigger-based automations. |
-| GTK4 client | A native desktop app that drives every feature and runs a full self-test suite against the phone. |
+| GTK4 client | A proof-of-concept native desktop app that demonstrates every feature and runs a full self-test suite against the phone. |
 
 Everything has been verified end to end on real hardware.
 
@@ -41,8 +42,11 @@ Everything has been verified end to end on real hardware.
 - **Automations.** Rules match incoming notifications on app, title, or text
   (substring or regex) and fire actions: ring the phone, reply, call any tool, or
   raise a desktop notification.
-- **GTK4 desktop client.** Per-feature tabs and a one-click "Run all feature
-  tests" that exercises the safe tool surface against the phone.
+- **GTK4 proof-of-concept client.** Per-feature tabs and a one-click "Run all
+  feature tests" that exercises the safe tool surface against the phone. It
+  demonstrates the MCP surface rather than being a polished product; see the
+  [documentation](https://olafkfreund.github.io/lxconnect/documentation.html) for
+  the full tool reference.
 - **Reproducible.** Packaged as a Nix flake, with CI and signed releases.
 
 ## Architecture
