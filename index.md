@@ -2,11 +2,11 @@
 layout: default
 ---
 
-# lxconnect 🚀
+# lxconnect
 
 **Android to Linux Desktop Bridge** for Waydroid and Native Android environments — control your phone (or let an AI agent control it) from your Linux desktop over a pinned-TLS MCP connection.
 
-[**⬇ Download the latest signed APK**](https://github.com/olafkfreund/lxconnect/releases/latest) · [Source on GitHub](https://github.com/olafkfreund/lxconnect)
+[**Download the latest signed APK**](https://github.com/olafkfreund/lxconnect/releases/latest) · [Source on GitHub](https://github.com/olafkfreund/lxconnect)
 
 ## Features
 - **MCP Server:** Exposes Android capabilities (Files, Notifications, Intents, Apps) to your Linux environment.

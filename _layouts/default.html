@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if page.title %}{{ page.title }} · {% endif %}{{ site.title }}</title>
+  <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
+</head>
+<body>
+  <header class="site-header">
+    <a class="site-title" href="{{ '/' | relative_url }}">lxconnect</a>
+    <nav>
+      <a href="{{ '/' | relative_url }}">Home</a>
+      <a href="https://github.com/olafkfreund/lxconnect">GitHub</a>
+      <a href="https://github.com/olafkfreund/lxconnect/releases/latest">Releases</a>
+    </nav>
+  </header>
+  <main class="content">
+    {{ content }}
+  </main>
+  <footer class="site-footer">
+    <p>{{ site.description }} · <a href="https://github.com/olafkfreund/lxconnect">Source on GitHub</a></p>
+  </footer>
+</body>
+</html>

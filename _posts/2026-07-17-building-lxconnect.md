@@ -1,12 +1,8 @@
 ---
-layout: default
+layout: post
 title: "Building lxconnect: an agent-controllable phone over pinned TLS"
 date: 2026-07-17
 ---
-
-# Building lxconnect: an agent-controllable phone over pinned TLS
-
-*2026-07-17*
 
 lxconnect turns an Android phone into something you — or an AI agent — can drive
 from your Linux desktop: read and reply to notifications, send SMS, search

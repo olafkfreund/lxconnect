@@ -1,5 +1,29 @@
 title: lxconnect
-description: Android to Linux Desktop Bridge (Waydroid & Native)
-remote_theme: rphlmr/jekyll-gruvbox-theme
-plugins:
-  - jekyll-remote-theme
+description: Android to Linux Desktop Bridge — an agent-controllable phone over pinned TLS
+url: "https://olafkfreund.github.io"
+baseurl: "/lxconnect" # project page is served under /lxconnect/, so relative_url must prefix it
+markdown: kramdown
+# Self-contained Gruvbox Dark theme (see _layouts/ and assets/css/style.css).
+# The old remote_theme: rphlmr/jekyll-gruvbox-theme kept its files in a subfolder
+# that remote_theme cannot read, which left the page unstyled (plain white).
+
+# Only the site files (index.md, _posts, _layouts, assets) should be built.
+exclude:
+  - app
+  - build
+  - daemon
+  - gradle
+  - gradlew
+  - gradlew.bat
+  - build.gradle.kts
+  - settings.gradle.kts
+  - gradle.properties
+  - local.properties
+  - flake.nix
+  - flake.lock
+  - shell.nix
+  - devenv.nix
+  - catalog-info.yaml
+  - README.md
+  - Gemfile
+  - Gemfile.lock
