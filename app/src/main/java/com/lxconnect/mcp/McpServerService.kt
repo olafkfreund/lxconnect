@@ -39,6 +39,7 @@ class McpServerService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.IO)
     private var serverEngine: EmbeddedServer<*, *>? = null
     private var mcpServer: Server? = null
+    private var tlsProxy: TlsProxy? = null
 
     private var secureSharedKey = ""
 
@@ -59,6 +60,7 @@ class McpServerService : Service() {
         if (instance == this) {
             instance = null
         }
+        tlsProxy?.close()
         serverEngine?.stop(1000, 2000)
         serviceScope.cancel()
     }
@@ -88,23 +90,13 @@ class McpServerService : Service() {
     }
 
     private fun startMcpServer() {
-        // HTTPS only: self-signed cert generated on first run (see McpApplication), reused
-        // across restarts. No plaintext connector.
+        // Netty serves PLAINTEXT bound to localhost only; a Conscrypt SSLServerSocket
+        // (TlsProxy) terminates TLS on :8080 and pipes to it. Netty's own SslHandler is
+        // unreliable on Android/Conscrypt (throws AssertionError), so we keep TLS out of it.
         val keyStore = McpApplication.getTlsKeyStore(this)
         val keyStorePassword = McpApplication.getTlsKeystorePasswordChars(this)
-        val environment = applicationEnvironment {}
 
-        serverEngine = embeddedServer(Netty, environment, configure = {
-            sslConnector(
-                keyStore = keyStore,
-                keyAlias = McpApplication.TLS_KEY_ALIAS,
-                keyStorePassword = { keyStorePassword },
-                privateKeyPassword = { keyStorePassword }
-            ) {
-                port = 8080
-                host = "0.0.0.0"
-            }
-        }) {
+        serverEngine = embeddedServer(Netty, port = 8081, host = "127.0.0.1") {
             // Install Ktor SSE Plugin (required by MCP SDK for SSE transport routing)
             install(io.ktor.server.sse.SSE)
 
@@ -124,7 +116,9 @@ class McpServerService : Service() {
                 }
             }
         }.start(wait = false)
-        Log.i(TAG, "Ktor Netty Server started (HTTPS) on port 8080")
+
+        tlsProxy = TlsProxy(keyStore, keyStorePassword).also { it.start() }
+        Log.i(TAG, "Server started: TLS :8080 -> plaintext 127.0.0.1:8081")
     }
 
     private fun createMcpServerInstance(): Server {
