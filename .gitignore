@@ -18,3 +18,7 @@ app/build/
 local.properties
 __pycache__/
 logcat_dump*.txt
+
+# Release signing secrets (never commit)
+*.jks
+.release-secrets
