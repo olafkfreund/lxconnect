@@ -44,6 +44,7 @@
             pkgs.libnotify
             pkgs.qrencode
             pkgs.zenity # inline-reply prompt for desktop notification actions
+            pkgs.openssl # ephemeral cert for the HTTPS pairing server
           ];
 
           installPhase = ''
@@ -63,7 +64,7 @@
           postFixup = ''
             # Make sure the CLI can find notify-send, qrencode and zenity
             wrapProgram $out/bin/lxconnect \
-              --prefix PATH : "${pkgs.libnotify}/bin:${pkgs.qrencode}/bin:${pkgs.zenity}/bin"
+              --prefix PATH : "${pkgs.libnotify}/bin:${pkgs.qrencode}/bin:${pkgs.zenity}/bin:${pkgs.openssl}/bin"
           '';
         };
 

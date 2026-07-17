@@ -181,8 +181,9 @@ class MainActivity : AppCompatActivity() {
             val ip = data.getQueryParameter("ip")
             val port = data.getQueryParameter("port")
             val secret = data.getQueryParameter("secret")
-            if (ip != null && port != null && secret != null) {
-                pairWithLinux(ip, port, secret)
+            val pairFp = data.getQueryParameter("pairFp")
+            if (ip != null && port != null && secret != null && pairFp != null) {
+                pairWithLinux(ip, port, secret, pairFp)
             }
         }
     }
@@ -206,7 +207,24 @@ class MainActivity : AppCompatActivity() {
         return null
     }
 
-    private fun pairWithLinux(ip: String, port: String, secret: String) {
+    // Trusts only the pairing server whose leaf cert SHA-256 matches the fingerprint
+    // carried in the QR — so the secret is exchanged over pinned TLS, not cleartext.
+    private fun pinnedSocketFactory(fpHex: String): javax.net.ssl.SSLSocketFactory {
+        val tm = object : javax.net.ssl.X509TrustManager {
+            override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
+            override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {
+                val digest = java.security.MessageDigest.getInstance("SHA-256").digest(chain[0].encoded)
+                val actual = digest.joinToString("") { "%02x".format(it) }
+                if (actual != fpHex) throw java.security.cert.CertificateException("Pairing cert pin mismatch")
+            }
+            override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+        }
+        val ctx = javax.net.ssl.SSLContext.getInstance("TLS")
+        ctx.init(null, arrayOf<javax.net.ssl.TrustManager>(tm), null)
+        return ctx.socketFactory
+    }
+
+    private fun pairWithLinux(ip: String, port: String, secret: String, pairFp: String) {
         val prefs = getSharedPreferences("lxconnect_prefs", android.content.Context.MODE_PRIVATE)
         prefs.edit().putString("secure_shared_key", secret).apply()
 
@@ -225,10 +243,12 @@ class MainActivity : AppCompatActivity() {
             var success = false
             var lastErrorMessage = ""
             for (targetIp in ipsToTry) {
-                val urlString = "http://$targetIp:$port/pair"
+                val urlString = "https://$targetIp:$port/pair"
                 try {
                     val url = java.net.URL(urlString)
-                    val conn = url.openConnection() as java.net.HttpURLConnection
+                    val conn = url.openConnection() as javax.net.ssl.HttpsURLConnection
+                    conn.sslSocketFactory = pinnedSocketFactory(pairFp)
+                    conn.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true }
                     conn.connectTimeout = 3000
                     conn.readTimeout = 3000
                     conn.requestMethod = "POST"
