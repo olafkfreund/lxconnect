@@ -8,6 +8,7 @@ metadata:
   title: lxconnect
   description: "Android to Linux Desktop Bridge (Waydroid & Native)"
   annotations:
+    backstage.io/techdocs-ref: dir:.
     github.com/project-slug: olafkfreund/lxconnect
   tags: []
 spec:
