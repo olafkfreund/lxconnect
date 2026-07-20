@@ -12,11 +12,18 @@ button, and one without 'body-markup' gets plain text.
 
 import os
 import threading
+from html import escape
 
 CACHE_DIR = os.path.expanduser("~/.cache/lxconnect/icons")
 
 BUS_NAME = "org.freedesktop.Notifications"
 BUS_PATH = "/org/freedesktop/Notifications"
+
+# Ceilings so a long-lived daemon can't grow without bound. A notification
+# server that never emits NotificationClosed would otherwise leak one map entry
+# per notification, and every mirrored image would stay on disk forever.
+MAX_TRACKED = 512
+MAX_CACHED_IMAGES = 64
 
 
 
@@ -37,7 +44,8 @@ class Notifier:
         self._bus = bus
         self._caps = None
         self._ready = threading.Event()
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()          # guards the id maps
+        self._notify_lock = threading.Lock()   # serializes post-and-record
         # A phone notification updates in place (typing indicators, edits), so
         # keep its desktop id and reuse it as replaces_id instead of stacking.
         self._key_to_id = {}
@@ -111,9 +119,12 @@ class Notifier:
         if markup and notif.get("urls") and "body-hyperlinks" in caps:
             # Links only present in the intent (not the visible text) would
             # otherwise be unreachable; append the ones we found as spans.
-            shown = [u for u in notif["urls"] if u not in body]
+            # The URLs come from the phone, so they are escaped before being
+            # embedded -- an unescaped quote would break out of href="...".
+            shown = [u for u in notif["urls"] if escape(u) not in body]
             if shown:
-                links = " ".join(f'<a href="{u}">{u}</a>' for u in shown)
+                links = " ".join(
+                    f'<a href="{escape(u, quote=True)}">{escape(u)}</a>' for u in shown)
                 body = f"{body}\n{links}" if body else links
 
         actions = []
@@ -121,8 +132,12 @@ class Notifier:
             # The spec's "default" action is what firing the popup's body does.
             actions += ["default", "Open on phone"]
             if self._reply_action(notif):
-                if "inline-reply" not in caps:
-                    actions += ["reply", "Reply"]
+                # Servers render the inline text field for the "inline-reply"
+                # action id; the placeholder hint alone does nothing. Without
+                # this the field never appears and the fallback button is
+                # suppressed, leaving no way to reply at all.
+                actions += (["inline-reply", "Reply"] if "inline-reply" in caps
+                            else ["reply", "Reply"])
             for action in notif.get("actions", []):
                 if action.get("isReply"):
                     continue
@@ -155,24 +170,36 @@ class Notifier:
                 hints["image-path"] = image
 
         key = notif.get("key", "")
-        with self._lock:
-            replaces = self._key_to_id.get(key, 0)
-        try:
-            result = self._call_bus(
-                "Notify", "(susssasa{sv}i)",
-                (self.APP_NAME, replaces, icon, summary, body, actions,
-                 {k: self._variant(v) for k, v in hints.items()}, -1),
-                "(u)",
-            )
-        except Exception as e:
-            print(f"Desktop notification failed ({e}): {summary} — {body}")
-            return None
-        notif_id = result[0] if result else 0
-        if notif_id and key:
+        # Reading replaces_id, posting, and storing the new id must be one
+        # atomic step: two updates to the same phone notification racing here
+        # both saw no existing id and posted two popups instead of updating one.
+        # Images were fetched above so this holds only across a local call.
+        with self._notify_lock:
             with self._lock:
-                self._key_to_id[key] = notif_id
-                self._id_to_key[notif_id] = key
+                replaces = self._key_to_id.get(key, 0)
+            try:
+                result = self._call_bus(
+                    "Notify", "(susssasa{sv}i)",
+                    (self.APP_NAME, replaces, icon, summary, body, actions,
+                     {k: self._variant(v) for k, v in hints.items()}, -1),
+                    "(u)",
+                )
+            except Exception as e:
+                print(f"Desktop notification failed ({e}): {summary} — {body}")
+                return None
+            notif_id = result[0] if result else 0
+            if notif_id and key:
+                with self._lock:
+                    self._key_to_id[key] = notif_id
+                    self._id_to_key[notif_id] = key
+                    self._forget_oldest()
         return notif_id
+
+    def _forget_oldest(self):
+        """Bounds the id maps. Caller holds self._lock."""
+        while len(self._key_to_id) > MAX_TRACKED:
+            old_key = next(iter(self._key_to_id))          # insertion ordered
+            self._id_to_key.pop(self._key_to_id.pop(old_key), None)
 
     @staticmethod
     def _variant(value):
@@ -220,7 +247,10 @@ class Notifier:
         path = os.path.join(CACHE_DIR, f"n_{safe}_{which}.png")
         data = self._fetch_image(
             "get_notification_image", {"notificationKey": key, "which": which})
-        return self._write_cache(path, data)
+        written = self._write_cache(path, data)
+        if written:
+            _trim_image_cache()
+        return written
 
     @staticmethod
     def _write_cache(path, data):
@@ -273,6 +303,28 @@ class Notifier:
                 self._id_to_key.pop(notif_id, None)
                 if self._key_to_id.get(key) == notif_id:
                     self._key_to_id.pop(key, None)
+
+
+def _trim_image_cache(limit=MAX_CACHED_IMAGES):
+    """Keeps the newest per-notification images and drops the rest.
+
+    App icons ("<package>.png") are bounded by how many apps you have and are
+    left alone; notification images are keyed per notification instance, so
+    without this every avatar and photo ever mirrored stays on disk forever.
+    """
+    try:
+        files = [os.path.join(CACHE_DIR, f) for f in os.listdir(CACHE_DIR)
+                 if f.startswith("n_")]
+        if len(files) <= limit:
+            return
+        files.sort(key=os.path.getmtime, reverse=True)
+        for stale in files[limit:]:
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def _prompt_for_reply():

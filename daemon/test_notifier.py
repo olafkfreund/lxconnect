@@ -47,6 +47,20 @@ class TestBuild(unittest.TestCase):
         self.assertNotIn("reply", actions)
         self.assertIn("x-kde-reply-placeholder-text", hints)
 
+    def test_inline_reply_action_id_is_present(self):
+        # The hint alone renders no text field: without the action id there is
+        # neither an inline field nor the fallback button, so reply is
+        # unreachable on exactly the servers that support it.
+        _, _, actions, _ = make().build(CHAT, FULL_CAPS)
+        self.assertIn("inline-reply", actions)
+
+    def test_some_way_to_reply_exists_for_every_capability_mix(self):
+        for caps in ({"actions", "inline-reply"}, {"actions"}, FULL_CAPS,
+                     FULL_CAPS - {"inline-reply"}):
+            _, _, actions, _ = make().build(CHAT, caps)
+            self.assertTrue({"inline-reply", "reply"} & set(actions),
+                            f"no way to reply with caps={sorted(caps)}")
+
     def test_reply_button_when_server_lacks_inline_reply(self):
         caps = FULL_CAPS - {"inline-reply"}
         _, _, actions, hints = make().build(CHAT, caps)
@@ -68,6 +82,16 @@ class TestBuild(unittest.TestCase):
         notif = dict(CHAT, text="tap here", textMarkup="tap here")
         _, body, _, _ = make().build(notif, FULL_CAPS)
         self.assertIn('<a href="https://example.com">', body)
+
+    def test_appended_urls_are_escaped(self):
+        # The URL comes from the phone; an unescaped quote would break out of
+        # href="..." and corrupt the markup the desktop server parses.
+        evil = 'https://e.test/?a=1&b=2"><script'
+        notif = dict(CHAT, text="tap", textMarkup="tap", urls=[evil])
+        _, body, _, _ = make().build(notif, FULL_CAPS)
+        self.assertNotIn('"><script', body)
+        self.assertIn("&amp;", body)
+        self.assertIn("&quot;", body)
 
     def test_call_category_is_urgent(self):
         _, _, _, hints = make().build(dict(CHAT, category="call"), FULL_CAPS)
@@ -108,6 +132,16 @@ class TestSignalRouting(unittest.TestCase):
     def test_empty_reply_is_not_sent(self):
         self.n.handle_signal("NotificationReplied", [7, ""])
         self.assertEqual(self.calls, [])
+
+    def test_tracked_ids_stay_bounded(self):
+        # A server that never emits NotificationClosed would otherwise leak one
+        # entry per notification for the daemon's whole uptime.
+        for i in range(notifier.MAX_TRACKED + 50):
+            self.n._key_to_id[f"k{i}"] = i
+            self.n._id_to_key[i] = f"k{i}"
+            self.n._forget_oldest()
+        self.assertLessEqual(len(self.n._key_to_id), notifier.MAX_TRACKED)
+        self.assertLessEqual(len(self.n._id_to_key), notifier.MAX_TRACKED + 1)
 
     def test_close_forgets_the_mapping_both_ways(self):
         self.n.handle_signal("NotificationClosed", [7, 2])

@@ -103,15 +103,24 @@ def notify_desktop(title, body):
     notifier.simple(title, body)
 
 _rich_notifier = None
+_notifier_lock = threading.Lock()
 
 def get_notifier():
-    """The D-Bus notifier, started on first use."""
+    """The D-Bus notifier, started on first use.
+
+    Locked because notify_rich() calls this from a fresh thread per
+    notification: two arriving together would otherwise each build a Notifier
+    and start its own GLib main loop, leaking the loser's thread and
+    double-handling clicks on any popup it had already posted.
+    """
     global _rich_notifier
-    if _rich_notifier is None:
-        _rich_notifier = notifier.Notifier(call_tool, fetch_image)
-        if not _rich_notifier.start():
-            print("Notification server did not respond; using plain notifications.")
-    return _rich_notifier
+    with _notifier_lock:
+        if _rich_notifier is None:
+            instance = notifier.Notifier(call_tool, fetch_image)
+            if not instance.start():
+                print("Notification server did not respond; using plain notifications.")
+            _rich_notifier = instance
+        return _rich_notifier
 
 def notify_rich(notif):
     """Post a phone notification to the desktop. Runs off-thread: fetching an
