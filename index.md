@@ -36,7 +36,7 @@ nix run github:olafkfreund/lxconnect#gui
 ## Architecture
 
 1. **Android App:** Runs a Ktor MCP Server on port 8080. Connects to `NotificationListenerService` and `PackageManager` to bypass Android sandboxes.
-2. **Daemon CLI:** A Python HTTP daemon (`lxconnect daemon`) that reads Server-Sent Events (SSE) from the Android app and integrates with `libnotify` for Linux desktop notifications.
+2. **Daemon CLI:** A Python HTTP daemon (`lxconnect daemon`) that reads Server-Sent Events (SSE) from the Android app and posts rich Linux desktop notifications over D-Bus.
 3. **Secure Transport:** TLS is terminated on-device by a Conscrypt `SSLServerSocket`; the daemon pins the phone's self-signed certificate, whose fingerprint is exchanged at pairing time.
 
 ## Blog

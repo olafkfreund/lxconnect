@@ -13,7 +13,7 @@ it, with a real-life walkthrough at the end.
 
 ## What the MCP server gives you
 
-The phone exposes roughly two dozen **tools** — typed, named operations an
+The phone exposes about thirty **tools** — typed, named operations an
 authenticated client can invoke. They fall into a few groups: messaging and
 notifications, device status, media, camera, apps and navigation, files,
 contacts, clipboard, and screen control through the AccessibilityService.
