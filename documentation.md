@@ -176,7 +176,7 @@ argument.
 
 | Tool | Arguments | Effect |
 | --- | --- | --- |
-| `list_notifications` | — | List active status-bar notifications (key, app label, title, text). |
+| `list_notifications` | — | List active status-bar notifications (key, app label, package, title, text). |
 | `reply_to_notification` | `notificationKey`*, `replyText`* | Send an inline reply to a chat/message notification. |
 | `activate_notification` | `notificationKey`* | Open the app where the notification points — the same as tapping it on the phone. |
 | `invoke_notification_action` | `notificationKey`*, `actionIndex`* | Press one of the notification's action buttons ("Mark as read", "Archive"). |
