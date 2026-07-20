@@ -149,7 +149,8 @@ class McpServerService : Service() {
                 "No active notifications found."
             } else {
                 notifications.joinToString("\n\n") { n ->
-                    "Key: ${n["key"]}\nApp: ${n["appLabel"]} (${n["packageName"]})\nTitle: ${n["title"]}\nText: ${n["text"]}"
+                    "Key: ${n["key"]}\nApp: ${n["appLabel"]}\nPackage: ${n["packageName"]}\n" +
+                        "Title: ${n["title"]}\nText: ${n["text"]}"
                 }
             }
             CallToolResult(content = listOf(TextContent(text = text)))
