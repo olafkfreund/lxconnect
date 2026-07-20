@@ -19,6 +19,9 @@ from urllib.parse import urljoin
 import main  # reuse get_connection_details / _pinned_opener / _require_fingerprint
 
 
+notification_params = main.notification_params
+
+
 class MCPClient:
     def __init__(self, on_notification=None, on_status=None, connect=None):
         self.on_notification = on_notification  # fn(params: dict)
@@ -116,7 +119,7 @@ class MCPClient:
         if msg.get("method") == "notifications/phone_notification":
             if self.on_notification:
                 try:
-                    self.on_notification(msg.get("params", {}))
+                    self.on_notification(notification_params(msg))
                 except Exception:
                     pass
             return

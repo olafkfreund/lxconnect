@@ -38,7 +38,7 @@ class McpServerService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.IO)
     private var serverEngine: EmbeddedServer<*, *>? = null
-    private var mcpServer: Server? = null
+    private val mcpServers = java.util.concurrent.CopyOnWriteArrayList<Server>()
     private var tlsProxy: TlsProxy? = null
 
     private var secureSharedKey = ""
@@ -113,7 +113,10 @@ class McpServerService : Service() {
             routing {
                 // Ktor 3.x mcp builder takes a block returning the Server instance
                 mcp {
-                    createMcpServerInstance().also { mcpServer = it }
+                    // Runs per connection: every client gets its own Server. Keeping
+                    // only the latest meant a second client stole the push channel,
+                    // and its disconnect killed mirroring for everyone still attached.
+                    createMcpServerInstance().also { mcpServers.add(it) }
                 }
             }
         }.start(wait = false)
@@ -146,7 +149,7 @@ class McpServerService : Service() {
                 "No active notifications found."
             } else {
                 notifications.joinToString("\n\n") { n ->
-                    "Key: ${n["key"]}\nApp: ${n["packageName"]}\nTitle: ${n["title"]}\nText: ${n["text"]}"
+                    "Key: ${n["key"]}\nApp: ${n["appLabel"]} (${n["packageName"]})\nTitle: ${n["title"]}\nText: ${n["text"]}"
                 }
             }
             CallToolResult(content = listOf(TextContent(text = text)))
@@ -178,6 +181,129 @@ class McpServerService : Service() {
                 CallToolResult(content = listOf(TextContent(text = "Reply sent successfully.")))
             } else {
                 CallToolResult(content = listOf(TextContent(text = "Failed to reply. Notification might be gone, or doesn't support direct replies.")), isError = true)
+            }
+        }
+
+        // Tool 2b: activate_notification — resume the app where the notification points
+        server.addTool(
+            name = "activate_notification",
+            description = "Open the app behind a notification, exactly where tapping it on the phone would land. Resumes the conversation, article or screen it refers to.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("notificationKey") {
+                        put("type", "string")
+                        put("description", "The unique notification key returned by list_notifications.")
+                    }
+                },
+                required = listOf("notificationKey")
+            )
+        ) { request ->
+            val key = request.params.arguments?.get("notificationKey").asString("notificationKey")
+            if (CustomNotificationListener.activate(key)) {
+                CallToolResult(content = listOf(TextContent(text = "Opened notification on device.")))
+            } else {
+                CallToolResult(content = listOf(TextContent(text = "Failed to open. The notification is gone or carries no content intent.")), isError = true)
+            }
+        }
+
+        // Tool 2c: invoke_notification_action — press one of its buttons
+        server.addTool(
+            name = "invoke_notification_action",
+            description = "Press one of a notification's action buttons (e.g. 'Mark as read', 'Archive') by its index. Use reply_to_notification for reply actions.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("notificationKey") {
+                        put("type", "string")
+                        put("description", "The unique notification key returned by list_notifications.")
+                    }
+                    putJsonObject("actionIndex") {
+                        put("type", "integer")
+                        put("description", "Zero-based index of the action button.")
+                    }
+                },
+                required = listOf("notificationKey", "actionIndex")
+            )
+        ) { request ->
+            val key = request.params.arguments?.get("notificationKey").asString("notificationKey")
+            val index = request.params.arguments?.get("actionIndex")?.jsonPrimitive?.int
+                ?: throw IllegalArgumentException("Missing actionIndex")
+            if (CustomNotificationListener.invokeAction(key, index)) {
+                CallToolResult(content = listOf(TextContent(text = "Action $index invoked.")))
+            } else {
+                CallToolResult(content = listOf(TextContent(text = "Failed to invoke action. The notification is gone or has no action at that index.")), isError = true)
+            }
+        }
+
+        // Tool 2d: dismiss_notification
+        server.addTool(
+            name = "dismiss_notification",
+            description = "Dismiss a notification on the phone, as swiping it away would.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("notificationKey") {
+                        put("type", "string")
+                        put("description", "The unique notification key returned by list_notifications.")
+                    }
+                },
+                required = listOf("notificationKey")
+            )
+        ) { request ->
+            val key = request.params.arguments?.get("notificationKey").asString("notificationKey")
+            if (CustomNotificationListener.dismiss(key)) {
+                CallToolResult(content = listOf(TextContent(text = "Notification dismissed.")))
+            } else {
+                CallToolResult(content = listOf(TextContent(text = "Failed to dismiss. The notification is no longer active.")), isError = true)
+            }
+        }
+
+        // Tool 2e: get_notification_image — avatar / inline picture, fetched on demand
+        server.addTool(
+            name = "get_notification_image",
+            description = "Fetch an image belonging to a notification: 'largeIcon' (sender avatar), 'picture' (inline BigPicture image) or 'appIcon'. Returned as a PNG.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("notificationKey") {
+                        put("type", "string")
+                        put("description", "The unique notification key returned by list_notifications.")
+                    }
+                    putJsonObject("which") {
+                        put("type", "string")
+                        put("description", "One of 'largeIcon', 'picture', 'appIcon'. Defaults to 'largeIcon'.")
+                    }
+                },
+                required = listOf("notificationKey")
+            )
+        ) { request ->
+            val key = request.params.arguments?.get("notificationKey").asString("notificationKey")
+            val which = request.params.arguments?.get("which")?.jsonPrimitive?.content ?: "largeIcon"
+            val b64 = CustomNotificationListener.image(key, which)
+            if (b64 != null) {
+                CallToolResult(content = listOf(ImageContent(data = b64, mimeType = "image/png")))
+            } else {
+                CallToolResult(content = listOf(TextContent(text = "No '$which' image for that notification.")), isError = true)
+            }
+        }
+
+        // Tool 2f: get_app_icon — cached client-side, so this is called once per app
+        server.addTool(
+            name = "get_app_icon",
+            description = "Fetch an installed app's launcher icon as a PNG, for rendering its notifications on the desktop.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("packageName") {
+                        put("type", "string")
+                        put("description", "The app's package name, e.g. com.whatsapp.")
+                    }
+                },
+                required = listOf("packageName")
+            )
+        ) { request ->
+            val packageName = request.params.arguments?.get("packageName").asString("packageName")
+            val b64 = CustomNotificationListener.appIcon(packageName)
+            if (b64 != null) {
+                CallToolResult(content = listOf(ImageContent(data = b64, mimeType = "image/png")))
+            } else {
+                CallToolResult(content = listOf(TextContent(text = "No icon found for package '$packageName'.")), isError = true)
             }
         }
 
@@ -750,32 +876,38 @@ class McpServerService : Service() {
 
     // Uses the SDK's public CustomNotification type (notifications/* extension mechanism) and
     // ServerSession.notification(), a public method inherited from Protocol. No reflection needed.
-    fun broadcastNotification(key: String, packageName: String, title: String, text: String) {
+    fun broadcastNotificationRemoved(key: String) {
+        push("notifications/phone_notification_removed", buildJsonObject { put("key", key) })
+    }
+
+    fun broadcastNotification(meta: JsonObject) {
+        push("notifications/phone_notification", meta)
+    }
+
+    private fun push(method: String, meta: JsonObject) {
         serviceScope.launch {
             try {
-                mcpServer?.let { server ->
+                val notification = CustomNotification(
+                    method = Method.Custom(method),
+                    params = BaseNotificationParams(meta = meta)
+                )
+                mcpServers.forEach { server ->
                     val sessions = server.sessions
-                    if (sessions.isNotEmpty()) {
-                        val meta = buildJsonObject {
-                            put("key", key)
-                            put("packageName", packageName)
-                            put("title", title)
-                            put("text", text)
-                            put("time", System.currentTimeMillis())
+                    if (sessions.isEmpty()) return@forEach // still handshaking
+                    var delivered = 0
+                    sessions.values.forEach { session ->
+                        try {
+                            session.notification(notification)
+                            delivered++
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Push failed for a session", e)
                         }
-                        val notification = CustomNotification(
-                            method = Method.Custom("notifications/phone_notification"),
-                            params = BaseNotificationParams(meta = meta)
-                        )
-
-                        sessions.values.forEach { session ->
-                            try {
-                                session.notification(notification)
-                                Log.d(TAG, "Successfully pushed notification to client session.")
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error pushing notification to session", e)
-                            }
-                        }
+                    }
+                    // Every session on this server failed, so that client is gone.
+                    // Its Server would otherwise throw on every future notification.
+                    if (delivered == 0) {
+                        Log.d(TAG, "Dropping disconnected client")
+                        mcpServers.remove(server)
                     }
                 }
             } catch (e: Exception) {

@@ -22,7 +22,7 @@ Three components:
 
 | Component | What it does |
 | --- | --- |
-| Android app | Runs an on-device MCP server exposing ~24 typed tools plus an AccessibilityService for driving arbitrary app UIs. |
+| Android app | Runs an on-device MCP server exposing 30 typed tools plus an AccessibilityService for driving arbitrary app UIs. |
 | Python daemon | Bridges the phone to the desktop — notification mirroring, inline reply, tool dispatch, and trigger-based automations. |
 | GTK4 client | A proof-of-concept native desktop app that demonstrates every feature and runs a full self-test suite against the phone. |
 
@@ -30,10 +30,16 @@ Everything has been verified end to end on real hardware.
 
 ## Features
 
-- **MCP server on the phone.** Around 24 typed tools: SMS send and history,
+- **MCP server on the phone.** Around 30 typed tools: SMS send and history,
   notification listing and reply, contact search, media status and control,
   device and detailed status, ring, camera capture, clipboard, file transfer,
   app launch and stop, and deep links.
+- **Rich notification mirroring.** Phone notifications arrive on the desktop
+  looking native: real app name and icon, the full expanded body, bold/italic and
+  clickable links, inline images and sender avatars, inline reply, the app's own
+  action buttons, and click-to-open which resumes that exact screen on the phone.
+  They update in place instead of stacking. Capabilities are negotiated with your
+  notification server, so it degrades cleanly.
 - **Accessibility control.** Tap, swipe, type, read the screen, and screenshot —
   so an agent can drive any app, not just the ones wrapped as tools.
 - **Secure by default.** HTTPS on the device with a self-signed certificate that
@@ -55,7 +61,8 @@ Everything has been verified end to end on real hardware.
    `SSLServerSocket` that terminates TLS on port 8080. It hooks
    `NotificationListenerService`, `PackageManager`, and an AccessibilityService.
 2. **Python daemon.** Holds a Server-Sent Events session to the phone, mirrors
-   notifications to `libnotify`, dispatches tool calls, and runs automations.
+   notifications to `org.freedesktop.Notifications` over D-Bus, dispatches tool
+   calls, and runs automations.
 3. **Secure transport.** The daemon pins the phone's self-signed certificate by
    fingerprint. Pairing exchanges that fingerprint over its own pinned-TLS
    channel, so the shared secret never travels in cleartext.

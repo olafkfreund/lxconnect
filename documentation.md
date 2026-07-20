@@ -13,7 +13,7 @@ it, with a real-life walkthrough at the end.
 
 ## What the MCP server gives you
 
-The phone exposes roughly two dozen **tools** — typed, named operations an
+The phone exposes about thirty **tools** — typed, named operations an
 authenticated client can invoke. They fall into a few groups: messaging and
 notifications, device status, media, camera, apps and navigation, files,
 contacts, clipboard, and screen control through the AccessibilityService.
@@ -77,7 +77,45 @@ nix run github:olafkfreund/lxconnect -- ring start  # find your phone
 ```
 
 The `daemon` holds the live session and mirrors incoming phone notifications to
-your desktop, with an inline reply action.
+your desktop as **native rich notifications**.
+
+### Rich notifications
+
+Mirrored notifications are not plain text. The daemon talks to
+`org.freedesktop.Notifications` over D-Bus directly and negotiates what your
+notification server supports, so a mirrored notification looks like a local one:
+
+- **The real app identity** — "WhatsApp", not `com.whatsapp`, with the app's own
+  launcher icon (fetched once per app and cached in `~/.cache/lxconnect/icons`).
+- **The full body**, not the collapsed preview: expanded BigText, and chat
+  notifications rendered as `Sender: message` per line.
+- **Formatting and links** — bold, italic, underline and clickable URLs, carried
+  across from the phone's own styled text (requires `body-markup` /
+  `body-hyperlinks`).
+- **Images** — a message's photo or the sender's avatar, shown inline (requires
+  `body-images`).
+- **Inline reply** — type straight into the notification and it goes back to the
+  phone (requires `inline-reply`; otherwise you get a Reply button that opens a
+  text prompt).
+- **Click to open on the phone** — clicking the notification body fires its
+  content intent, so the phone jumps to that exact conversation or screen.
+- **The app's own buttons** — "Mark as read", "Archive" and friends appear as
+  desktop actions.
+- **Updates in place.** A phone notification that updates (typing indicators,
+  edited messages) replaces its desktop popup instead of stacking a new one, and
+  dismissing it on the phone retracts it from the desktop.
+
+Ongoing notifications (media players, downloads, foreground services) and group
+summary rows are filtered out, since they re-post constantly and aren't
+actionable.
+
+Check what your notification server supports with:
+
+```bash
+gdbus call --session --dest org.freedesktop.Notifications \
+  --object-path /org/freedesktop/Notifications \
+  --method org.freedesktop.Notifications.GetCapabilities
+```
 
 ### GTK proof-of-concept client
 
@@ -138,8 +176,13 @@ argument.
 
 | Tool | Arguments | Effect |
 | --- | --- | --- |
-| `list_notifications` | — | List active status-bar notifications (key, app, title, text). |
+| `list_notifications` | — | List active status-bar notifications (key, app label, title, text). |
 | `reply_to_notification` | `notificationKey`*, `replyText`* | Send an inline reply to a chat/message notification. |
+| `activate_notification` | `notificationKey`* | Open the app where the notification points — the same as tapping it on the phone. |
+| `invoke_notification_action` | `notificationKey`*, `actionIndex`* | Press one of the notification's action buttons ("Mark as read", "Archive"). |
+| `dismiss_notification` | `notificationKey`* | Dismiss the notification on the phone. |
+| `get_notification_image` | `notificationKey`*, `which` (`largeIcon`/`picture`/`appIcon`) | Fetch the sender avatar or inline image as a PNG. |
+| `get_app_icon` | `packageName`* | Fetch an app's launcher icon as a PNG. |
 | `send_sms` | `phoneNumber`*, `message`* | Send an SMS. |
 | `get_sms_history` | `limit` (default 10, clamped 0–1000) | Read recent SMS messages. |
 
