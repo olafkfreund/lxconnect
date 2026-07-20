@@ -87,6 +87,18 @@ def _require_fingerprint(fingerprint):
             "No pinned certificate found for this device. Re-pair with 'lxconnect pair' to continue."
         )
 
+def notification_params(msg):
+    """The phone's notification fields out of an SSE message.
+
+    The server sends them as MCP notification metadata, which serializes to the
+    reserved `_meta` member of params rather than to params itself. Reading
+    params directly yielded empty fields for every notification. Falling back to
+    params keeps this working if that ever changes.
+    """
+    params = msg.get("params") or {}
+    meta = params.get("_meta")
+    return meta if isinstance(meta, dict) else params
+
 def notify_desktop(title, body):
     notifier.simple(title, body)
 
@@ -142,7 +154,7 @@ def listen_daemon():
                             try:
                                 msg = json.loads(data_val)
                                 if msg.get("method") == "notifications/phone_notification":
-                                    params = msg.get("params", {})
+                                    params = notification_params(msg)
                                     title = params.get("title", "Android Notification")
                                     text = params.get("text", "")
                                     pkg = params.get("packageName", "")
@@ -152,7 +164,9 @@ def listen_daemon():
                                     _run_automations({"package": pkg, "title": title, "text": text, "key": key})
                                 elif msg.get("method") == "notifications/phone_notification_removed":
                                     # Dismissed on the phone: retract the desktop popup too.
-                                    get_notifier().close(msg.get("params", {}).get("key", ""))
+                                    removed_key = notification_params(msg).get("key", "")
+                                    print(f"✕ dismissed on phone: {removed_key}")
+                                    get_notifier().close(removed_key)
                                 elif _resolve_pending(msg):
                                     pass # Delivered to the call_tool_await() caller
                                 elif "result" in msg:

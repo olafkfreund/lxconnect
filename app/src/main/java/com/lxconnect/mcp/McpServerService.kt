@@ -38,7 +38,7 @@ class McpServerService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.IO)
     private var serverEngine: EmbeddedServer<*, *>? = null
-    private var mcpServer: Server? = null
+    private val mcpServers = java.util.concurrent.CopyOnWriteArrayList<Server>()
     private var tlsProxy: TlsProxy? = null
 
     private var secureSharedKey = ""
@@ -113,7 +113,10 @@ class McpServerService : Service() {
             routing {
                 // Ktor 3.x mcp builder takes a block returning the Server instance
                 mcp {
-                    createMcpServerInstance().also { mcpServer = it }
+                    // Runs per connection: every client gets its own Server. Keeping
+                    // only the latest meant a second client stole the push channel,
+                    // and its disconnect killed mirroring for everyone still attached.
+                    createMcpServerInstance().also { mcpServers.add(it) }
                 }
             }
         }.start(wait = false)
@@ -884,22 +887,27 @@ class McpServerService : Service() {
     private fun push(method: String, meta: JsonObject) {
         serviceScope.launch {
             try {
-                mcpServer?.let { server ->
+                val notification = CustomNotification(
+                    method = Method.Custom(method),
+                    params = BaseNotificationParams(meta = meta)
+                )
+                mcpServers.forEach { server ->
                     val sessions = server.sessions
-                    if (sessions.isNotEmpty()) {
-                        val notification = CustomNotification(
-                            method = Method.Custom(method),
-                            params = BaseNotificationParams(meta = meta)
-                        )
-
-                        sessions.values.forEach { session ->
-                            try {
-                                session.notification(notification)
-                                Log.d(TAG, "Successfully pushed notification to client session.")
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error pushing notification to session", e)
-                            }
+                    if (sessions.isEmpty()) return@forEach // still handshaking
+                    var delivered = 0
+                    sessions.values.forEach { session ->
+                        try {
+                            session.notification(notification)
+                            delivered++
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Push failed for a session", e)
                         }
+                    }
+                    // Every session on this server failed, so that client is gone.
+                    // Its Server would otherwise throw on every future notification.
+                    if (delivered == 0) {
+                        Log.d(TAG, "Dropping disconnected client")
+                        mcpServers.remove(server)
                     }
                 }
             } catch (e: Exception) {
