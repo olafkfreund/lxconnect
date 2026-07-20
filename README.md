@@ -34,6 +34,12 @@ Everything has been verified end to end on real hardware.
   notification listing and reply, contact search, media status and control,
   device and detailed status, ring, camera capture, clipboard, file transfer,
   app launch and stop, and deep links.
+- **Rich notification mirroring.** Phone notifications arrive on the desktop
+  looking native: real app name and icon, the full expanded body, bold/italic and
+  clickable links, inline images and sender avatars, inline reply, the app's own
+  action buttons, and click-to-open which resumes that exact screen on the phone.
+  They update in place instead of stacking. Capabilities are negotiated with your
+  notification server, so it degrades cleanly.
 - **Accessibility control.** Tap, swipe, type, read the screen, and screenshot —
   so an agent can drive any app, not just the ones wrapped as tools.
 - **Secure by default.** HTTPS on the device with a self-signed certificate that

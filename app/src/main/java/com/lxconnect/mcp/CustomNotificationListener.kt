@@ -8,7 +8,7 @@ import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
-import java.util.concurrent.ConcurrentHashMap
+import kotlinx.serialization.json.jsonPrimitive
 
 class CustomNotificationListener : NotificationListenerService() {
 
@@ -22,16 +22,24 @@ class CustomNotificationListener : NotificationListenerService() {
         super.onNotificationPosted(sbn)
         Log.d(TAG, "Notification posted: ${sbn.packageName}")
         try {
-            val extras = sbn.notification.extras
-            val title = extras.getString(Notification.EXTRA_TITLE) ?: ""
-            val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
-            val packageName = sbn.packageName ?: ""
-            val key = sbn.key ?: ""
-            if (title.isNotEmpty() || text.isNotEmpty()) {
-                McpServerService.instance?.broadcastNotification(key, packageName, title, text)
+            if (NotificationRich.isNoise(sbn)) return
+            val rich = NotificationRich.describe(this, sbn)
+            val hasContent = rich["title"]?.jsonPrimitive?.content.isNullOrEmpty().not() ||
+                rich["text"]?.jsonPrimitive?.content.isNullOrEmpty().not()
+            if (hasContent) {
+                McpServerService.instance?.broadcastNotification(rich)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error broadcasting notification", e)
+        }
+    }
+
+    override fun onNotificationRemoved(sbn: StatusBarNotification) {
+        super.onNotificationRemoved(sbn)
+        try {
+            McpServerService.instance?.broadcastNotificationRemoved(sbn.key ?: return)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error broadcasting removal", e)
         }
     }
 
@@ -47,20 +55,77 @@ class CustomNotificationListener : NotificationListenerService() {
         private var instance: CustomNotificationListener? = null
 
         fun getActiveNotifications(): List<Map<String, String>> {
-            val notifications = instance?.activeNotifications ?: return emptyList()
+            val context = instance ?: return emptyList()
+            val notifications = context.activeNotifications ?: return emptyList()
             return notifications.map { sbn ->
-                val extras = sbn.notification.extras
-                val title = extras.getString(Notification.EXTRA_TITLE) ?: "No Title"
-                val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: "No Text"
-                
+                val rich = NotificationRich.describe(context, sbn, summary = true)
+                fun field(name: String) = rich[name]?.jsonPrimitive?.content ?: ""
                 mapOf(
-                    "key" to sbn.key,
-                    "packageName" to sbn.packageName,
-                    "title" to title,
-                    "text" to text,
-                    "time" to sbn.postTime.toString()
+                    "key" to field("key"),
+                    "packageName" to field("packageName"),
+                    "appLabel" to field("appLabel"),
+                    "title" to field("title").ifEmpty { "No Title" },
+                    "text" to field("text").ifEmpty { "No Text" },
+                    "time" to field("time")
                 )
             }
+        }
+
+        private fun find(key: String): StatusBarNotification? =
+            instance?.activeNotifications?.find { it.key == key }
+
+        /**
+         * Fires the notification's contentIntent — the same thing tapping it on
+         * the phone does, so the app resumes exactly where the notification points.
+         */
+        fun activate(key: String): Boolean {
+            val context = instance ?: return false
+            val sbn = find(key) ?: return false
+            val intent = sbn.notification.contentIntent ?: return false
+            return try {
+                intent.send()
+                // Tapping a notification normally dismisses it if the app said so.
+                if (sbn.notification.flags and Notification.FLAG_AUTO_CANCEL != 0) {
+                    context.cancelNotification(key)
+                }
+                true
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to activate notification $key", e)
+                false
+            }
+        }
+
+        /** Invokes a non-reply action button by its index in list_notifications. */
+        fun invokeAction(key: String, index: Int): Boolean {
+            val context = instance ?: return false
+            val sbn = find(key) ?: return false
+            val action = sbn.notification.actions?.getOrNull(index) ?: return false
+            return try {
+                action.actionIntent.send(context, 0, Intent())
+                true
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to invoke action $index on $key", e)
+                false
+            }
+        }
+
+        fun dismiss(key: String): Boolean {
+            val context = instance ?: return false
+            if (find(key) == null) return false
+            context.cancelNotification(key)
+            return true
+        }
+
+        /** Base64 PNG for "largeIcon" | "picture" | "appIcon" of a notification. */
+        fun image(key: String, which: String): String? {
+            val context = instance ?: return null
+            val sbn = find(key) ?: return null
+            return NotificationRich.notificationImage(context, sbn, which)
+        }
+
+        fun appIcon(packageName: String): String? {
+            val context = instance ?: return null
+            return NotificationRich.appIcon(context, packageName)
         }
 
         fun reply(key: String, replyText: String): Boolean {

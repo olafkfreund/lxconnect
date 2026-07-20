@@ -13,6 +13,8 @@ import hmac
 import ssl
 import hashlib
 import http.client
+import itertools
+import notifier
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen, HTTPSHandler, build_opener
 from urllib.parse import urljoin
@@ -86,42 +88,28 @@ def _require_fingerprint(fingerprint):
         )
 
 def notify_desktop(title, body):
-    try:
-        subprocess.run(["notify-send", "-a", "lxconnect", title, body])
-    except Exception as e:
-        print(f"Failed to send desktop notification: {e}")
+    notifier.simple(title, body)
 
-def _prompt_and_send_reply(key):
-    try:
-        proc = subprocess.run(
-            ["zenity", "--entry", "--title=lxconnect Reply", "--text=Reply:"],
-            capture_output=True, text=True
-        )
-        if proc.returncode == 0 and proc.stdout.strip():
-            call_tool("reply_to_notification", {"notificationKey": key, "replyText": proc.stdout.strip()})
-    except Exception as e:
-        print(f"Reply prompt unavailable ({e}), skipping.")
+_rich_notifier = None
 
-def notify_with_reply(title, text, pkg, key):
-    """Actionable notification with a Reply button. Runs off-thread so it
-    never blocks the SSE loop; degrades to a plain notify_desktop() if
-    notify-send's -A/--action flag or zenity isn't available."""
-    body = f"{text}\n\nApp: {pkg}"
+def get_notifier():
+    """The D-Bus notifier, started on first use."""
+    global _rich_notifier
+    if _rich_notifier is None:
+        _rich_notifier = notifier.Notifier(call_tool, fetch_image)
+        if not _rich_notifier.start():
+            print("Notification server did not respond; using plain notifications.")
+    return _rich_notifier
+
+def notify_rich(notif):
+    """Post a phone notification to the desktop. Runs off-thread: fetching an
+    avatar round-trips to the phone and must not stall the SSE loop."""
     def worker():
         try:
-            # ponytail: 300s ceiling on the action prompt so unclicked notifications
-            # don't pile up worker threads forever; bump if that's too eager.
-            proc = subprocess.run(
-                ["notify-send", "-a", "lxconnect", "-A", "reply=Reply", f"📱 {title}", body],
-                capture_output=True, text=True, timeout=300
-            )
-            if proc.returncode != 0:
-                raise RuntimeError(proc.stderr.strip() or "notify-send action flag unsupported")
-            if proc.stdout.strip() == "reply":
-                _prompt_and_send_reply(key)
+            get_notifier().notify(notif)
         except Exception as e:
-            print(f"Actionable notification unavailable ({e}), falling back to plain notification.")
-            notify_desktop(f"📱 {title}", body)
+            print(f"Rich notification failed ({e}), falling back to plain.")
+            notify_desktop(notif.get("title", "Android"), notif.get("text", ""))
     threading.Thread(target=worker, daemon=True).start()
 
 def listen_daemon():
@@ -159,9 +147,14 @@ def listen_daemon():
                                     text = params.get("text", "")
                                     pkg = params.get("packageName", "")
                                     key = params.get("key", "")
-                                    print(f"🔔 Incoming Notification! Key: {key}")
-                                    notify_with_reply(title, text, pkg, key)
+                                    print(f"🔔 {params.get('appLabel') or pkg}: {title}")
+                                    notify_rich(params)
                                     _run_automations({"package": pkg, "title": title, "text": text, "key": key})
+                                elif msg.get("method") == "notifications/phone_notification_removed":
+                                    # Dismissed on the phone: retract the desktop popup too.
+                                    get_notifier().close(msg.get("params", {}).get("key", ""))
+                                elif _resolve_pending(msg):
+                                    pass # Delivered to the call_tool_await() caller
                                 elif "result" in msg:
                                     # It's an async response to a CLI tool execution
                                     content = msg["result"].get("content", [])
@@ -185,7 +178,11 @@ def get_active_endpoint():
     with open(ENDPOINT_FILE, "r") as f:
         return f.read().strip()
 
-def call_tool(tool_name, arguments):
+_request_id = itertools.count(int(time.time()) * 1000)
+_pending = {}
+_pending_lock = threading.Lock()
+
+def call_tool(tool_name, arguments, request_id=None):
     endpoint = get_active_endpoint()
     if not endpoint:
         raise RuntimeError("Daemon is not running or hasn't established a session. Start it with 'lxconnect daemon'.")
@@ -199,11 +196,49 @@ def call_tool(tool_name, arguments):
             "name": tool_name,
             "arguments": arguments
         },
-        "id": int(time.time())
+        # Monotonic: a plain timestamp collided for calls in the same second.
+        "id": request_id if request_id is not None else next(_request_id)
     }
     req = Request(post_url, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
     _pinned_opener(fingerprint).open(req) # Server returns 202 Accepted, actual result arrives in the daemon's SSE loop
     print(f"Command '{tool_name}' dispatched to Android device.")
+
+def call_tool_await(tool_name, arguments, timeout=10):
+    """call_tool, but blocks for the result the SSE loop routes back by id.
+    Only usable from inside a running daemon; returns None on timeout."""
+    request_id = next(_request_id)
+    slot = {"event": threading.Event(), "result": None}
+    with _pending_lock:
+        _pending[request_id] = slot
+    try:
+        call_tool(tool_name, arguments, request_id=request_id)
+        return slot["result"] if slot["event"].wait(timeout) else None
+    finally:
+        with _pending_lock:
+            _pending.pop(request_id, None)
+
+def _resolve_pending(msg):
+    """True if this SSE result belonged to a call_tool_await() caller."""
+    with _pending_lock:
+        slot = _pending.get(msg.get("id"))
+    if not slot:
+        return False
+    slot["result"] = msg.get("result")
+    slot["event"].set()
+    return True
+
+def fetch_image(tool_name, arguments):
+    """Blocking image fetch used by the notifier for icons and pictures."""
+    result = call_tool_await(tool_name, arguments)
+    if not result or result.get("isError"):
+        return None
+    for item in result.get("content", []):
+        if item.get("type") == "image" and item.get("data"):
+            try:
+                return base64.b64decode(item["data"])
+            except Exception:
+                return None
+    return None
 
 class PairingHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):

@@ -58,7 +58,8 @@
 
           installPhase = ''
             mkdir -p $out/bin $out/share/lxconnect
-            cp daemon/main.py daemon/mcp_client.py daemon/gui.py $out/share/lxconnect/
+            cp daemon/main.py daemon/mcp_client.py daemon/gui.py \
+               daemon/automations.py daemon/notifier.py $out/share/lxconnect/
 
             cat > $out/bin/lxconnect <<EOF
             #!/bin/sh
@@ -74,8 +75,11 @@
           '';
 
           postFixup = ''
+            # The daemon posts notifications over D-Bus via Gio, so the CLI needs
+            # the GObject typelib env too, not just the GUI.
             wrapProgram $out/bin/lxconnect \
-              --prefix PATH : "${pkgs.libnotify}/bin:${pkgs.qrencode}/bin:${pkgs.zenity}/bin:${pkgs.openssl}/bin"
+              --prefix PATH : "${pkgs.libnotify}/bin:${pkgs.qrencode}/bin:${pkgs.zenity}/bin:${pkgs.openssl}/bin" \
+              "''${gappsWrapperArgs[@]}"
 
             wrapProgram $out/bin/lxconnect-gui \
               --prefix PATH : "${pkgs.libnotify}/bin:${pkgs.qrencode}/bin:${pkgs.zenity}/bin:${pkgs.openssl}/bin" \
