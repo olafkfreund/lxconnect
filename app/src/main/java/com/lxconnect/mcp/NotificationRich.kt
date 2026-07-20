@@ -143,28 +143,46 @@ object NotificationRich {
         val text = cs.toString().take(MAX_BODY)
         if (cs !is Spanned) return escape(text)
 
-        // Walk the string once, emitting close tags before open tags at each
-        // boundary so nesting stays well-formed.
-        val opens = HashMap<Int, MutableList<String>>()
-        val closes = HashMap<Int, MutableList<String>>()
-        fun mark(start: Int, end: Int, open: String, close: String) {
-            if (start !in 0..text.length || end !in 0..text.length || start >= end) return
-            opens.getOrPut(start) { mutableListOf() }.add(open)
-            closes.getOrPut(end) { mutableListOf() }.add(0, close)
+        // Collect the spans we can express, longest first so an enclosing span is
+        // considered before anything it contains.
+        val candidates = mutableListOf<Triple<IntRange, String, String>>()
+        fun candidate(start: Int, end: Int, open: String, close: String) {
+            if (start < 0 || end > text.length || start >= end) return
+            candidates.add(Triple(start until end, open, close))
         }
 
         cs.getSpans(0, cs.length, Any::class.java).forEach { span ->
             val s = cs.getSpanStart(span)
             val e = cs.getSpanEnd(span)
             when (span) {
-                is URLSpan -> span.url?.let { mark(s, e, "<a href=\"${escape(it)}\">", "</a>") }
-                is UnderlineSpan -> mark(s, e, "<u>", "</u>")
+                is URLSpan -> span.url?.let { candidate(s, e, "<a href=\"${escape(it)}\">", "</a>") }
+                is UnderlineSpan -> candidate(s, e, "<u>", "</u>")
                 is StyleSpan -> when (span.style) {
-                    android.graphics.Typeface.BOLD -> mark(s, e, "<b>", "</b>")
-                    android.graphics.Typeface.ITALIC -> mark(s, e, "<i>", "</i>")
-                    android.graphics.Typeface.BOLD_ITALIC -> mark(s, e, "<b><i>", "</i></b>")
+                    android.graphics.Typeface.BOLD -> candidate(s, e, "<b>", "</b>")
+                    android.graphics.Typeface.ITALIC -> candidate(s, e, "<i>", "</i>")
+                    android.graphics.Typeface.BOLD_ITALIC -> candidate(s, e, "<b><i>", "</i></b>")
                 }
             }
+        }
+        candidates.sortWith(compareBy({ it.first.first }, { -it.first.last }))
+
+        // Android spans may partially overlap (bold [0,5) crossing a link [3,8)),
+        // which would emit <b>..<a>..</b>..</a>. Strict markup parsers reject the
+        // whole body for that, so keep only spans that nest cleanly.
+        val opens = HashMap<Int, MutableList<String>>()
+        val closes = HashMap<Int, MutableList<String>>()
+        val accepted = mutableListOf<IntRange>()
+        candidates.forEach { (range, open, close) ->
+            val nests = accepted.all { prior ->
+                val disjoint = range.first > prior.last || range.last < prior.first
+                val inside = range.first >= prior.first && range.last <= prior.last
+                disjoint || inside
+            }
+            if (!nests) return@forEach
+            accepted.add(range)
+            opens.getOrPut(range.first) { mutableListOf() }.add(open)
+            // Innermost closes first: later (inner) spans prepend.
+            closes.getOrPut(range.last + 1) { mutableListOf() }.add(0, close)
         }
 
         val out = StringBuilder(text.length)
