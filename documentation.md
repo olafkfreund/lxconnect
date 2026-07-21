@@ -13,7 +13,7 @@ it, with a real-life walkthrough at the end.
 
 ## What the MCP server gives you
 
-The phone exposes about thirty-five **tools** — typed, named operations an
+The phone exposes 34 **tools** — typed, named operations an
 authenticated client can invoke. They fall into a few groups: messaging and
 notifications, device status, media, camera, apps and navigation, files,
 contacts, clipboard, and screen control through the AccessibilityService.
@@ -292,33 +292,89 @@ freeform windowing its dimensions describe the screen rather than the app under
 test. `wait_for` polls the accessibility tree every 200 ms, which on a very large
 UI is not free — prefer short waits over long ones.
 
-## A real-life scenario
+## Use cases
 
-You are at your desk; your phone is charging in another room.
+### Your phone, from your desk
 
-1. A notification comes in. Your daemon mirrors it to the desktop — or you run
+Your phone is charging in another room.
+
+1. A notification comes in. The daemon mirrors it to the desktop — or you run
    `lxconnect triage` to see everything grouped by app: *"Signal: 2 — Alex, Mum;
    Slack: 1; WhatsApp: 3."*
-2. Alex asks when you'll be home. You reply from the desktop without getting up —
-   in the GTK client's Messaging tab, or by clicking **Reply** on the mirrored
-   desktop notification (`reply_to_notification`).
-3. You can't remember where you left the phone, so you hit **Ring**
+2. Alex asks when you'll be home. You reply from the desktop without getting up:
+   type straight into the mirrored notification, or use the GTK client's
+   Messaging tab (`reply_to_notification`).
+3. The message mentions a link. You click the notification body and the phone
+   jumps to that exact conversation (`activate_notification`), or you press the
+   app's own **Archive** button from the desktop
+   (`invoke_notification_action`).
+4. You can't remember where you left the phone, so you hit **Ring**
    (`ring_device`) and it chimes at full volume upstairs.
-4. Before a call you want to look presentable — **Take picture**
-   (`take_picture`) shows the room through the back camera, inline in the client.
-5. You set up an automation so this is hands-free next time: when Signal shows a
-   message from Alex, raise a desktop notification and ring the phone. Drop the
-   rule into `rules.json`; the running daemon picks it up.
 
-Because the phone is an MCP server, the same tools are available to an AI agent:
-"summarize my unread notifications and reply to Alex that I'll be home by six"
-becomes a short sequence of `list_notifications` and `reply_to_notification`
-calls — the phone is genuinely agent-controllable.
+### A phone an agent can actually use
+
+Because the phone *is* an MCP server, every tool above is available to a model.
+"Summarize my unread notifications and tell Alex I'll be home by six" becomes a
+short sequence of `list_notifications` and `reply_to_notification` calls. Nothing
+is scraped or screen-guessed — the agent calls typed operations and gets typed
+results back.
+
+Where no tool exists for what you want, the accessibility layer covers the rest:
+`read_screen` to see the UI, `tap_text` to act on it. An agent can drive an app
+that lxconnect knows nothing about.
+
+### QA on a real device, with no cable
+
+A tablet on your desk — or on the other side of a tailnet — becomes a test
+target:
+
+```
+start_app com.example.app          # or open_deep_link for a web page
+wait_for "Sign in"                 # synchronise, don't sleep
+tap_text "Email" ; input_text "…"  # act on elements, not coordinates
+tap_text "Continue"
+wait_for "Welcome back"            # this is the assertion
+screenshot                         # evidence for the report
+press_key back                     # unwind for the next case
+```
+
+This suits exploratory and smoke testing, checking a real OEM device and a real
+screen, and reproducing "only happens on that tablet" bugs — situations where
+wiring up adb is the thing standing in your way. It is not a replacement for
+Espresso or UIAutomator in CI — see *Limits worth knowing* under
+[Testing with lxconnect](#testing-with-lxconnect) above.
+
+### Testing a service the way a phone sees it
+
+`http_request` issues requests from the device: its Wi-Fi or mobile data, its TLS
+stack, its egress IP, its `User-Agent`.
+
+```json
+{"url": "https://api.example.com/health", "headers": {"Authorization": "Bearer …"}}
+```
+
+That catches what a desktop `curl` cannot reproduce — carrier NAT, mobile-network
+routing, a TLS configuration Android rejects, or geo-routing that depends on
+where the SIM is. Plain `http://` works too, so a service on the LAN or on the
+phone's own loopback is reachable.
+
+### Hands-free automations
+
+Rules in `rules.json` fire on incoming notifications without a human in the loop:
+when Signal shows a message from Alex, raise a desktop notification and ring the
+phone. The running daemon re-reads the file per notification, so there is nothing
+to restart.
 
 ## How it fits together
 
 The Android app runs a Ktor MCP server bound to localhost; a Conscrypt
 `SSLServerSocket` terminates TLS on port 8080 and forwards to it. The Linux client
 pins the phone's certificate by SHA-256 fingerprint (exchanged at pairing) and
-authenticates with the shared bearer token. Nothing is sent in cleartext, and the
-data plane is the same whether the client is the CLI, the GTK app, or a model.
+authenticates with the shared bearer token, so the desktop↔phone channel is never
+in cleartext. The data plane is the same whether the client is the CLI, the GTK
+app, or a model.
+
+(One deliberate exception: `http_request` can issue plain `http://` requests
+*outbound* from the phone, because testing a LAN service otherwise wouldn't work.
+That is traffic the phone originates on your behalf, not lxconnect's own control
+channel, which remains pinned TLS.)
