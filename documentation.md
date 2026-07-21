@@ -13,7 +13,7 @@ it, with a real-life walkthrough at the end.
 
 ## What the MCP server gives you
 
-The phone exposes about thirty **tools** — typed, named operations an
+The phone exposes about thirty-five **tools** — typed, named operations an
 authenticated client can invoke. They fall into a few groups: messaging and
 notifications, device status, media, camera, apps and navigation, files,
 contacts, clipboard, and screen control through the AccessibilityService.
@@ -190,7 +190,7 @@ argument.
 
 | Tool | Arguments | Effect |
 | --- | --- | --- |
-| `get_device_info` | — | Model, manufacturer, Android version, battery percentage. |
+| `get_device_info` | — | Model, manufacturer, Android version, battery percentage, and screen size/density/orientation. |
 | `get_detailed_status` | — | Battery and temperature, RAM, storage, Wi-Fi SSID/RSSI, carrier. |
 | `ring_device` | `action` (`start`/`stop`) | Ring the phone at maximum volume to locate it. |
 
@@ -231,11 +231,66 @@ argument.
 
 | Tool | Arguments | Effect |
 | --- | --- | --- |
-| `read_screen` | — | Dump the current UI tree (class, text, description, bounds, clickable). |
+| `read_screen` | — | Dump the UI tree of each visible window — app, keyboard, then system shade — one `window=` block each (class, view id, text, description, bounds, clickable, scrollable, enabled). |
 | `tap` | `x`*, `y`* | Tap at screen coordinates. |
+| `tap_text` | `query`* | Tap the element matching a text/description substring or an exact view id. Prefer this over `tap`. |
+| `wait_for` | `query`*, `timeoutMs` (default 5000, max 15000) | Block until a matching element appears, or time out. Capped below the clients' own call timeouts. |
+| `press_key` | `key`* (`back`/`home`/`recents`/`notifications`) | Press a system navigation key. |
 | `swipe` | `x1`*, `y1`*, `x2`*, `y2`* | Swipe between two points. |
 | `input_text` | `text`* | Type into the focused editable field. |
 | `screenshot` | — | Capture a screenshot (Android 11+); returns an image. |
+
+### Network
+
+| Tool | Arguments | Effect |
+| --- | --- | --- |
+| `http_request` | `url`*, `method`, `headers`, `body` | Make an HTTP(S) request **from the device** — its network, its TLS stack, its egress IP. Returns status, timing, response headers and body (body truncated at 20 000 bytes). |
+
+## Testing with lxconnect
+
+Because the tools are typed and the device is remote, lxconnect can drive test
+flows against a real tablet with no adb cable — over Tailscale if you like.
+
+```
+start_app / open_deep_link   →  put the device where the test begins
+wait_for                     →  synchronise instead of guessing at render time
+tap_text / input_text        →  act on elements, not coordinates
+read_screen / screenshot     →  assert on what is actually displayed
+press_key back               →  unwind between cases
+```
+
+Prefer `tap_text` and `wait_for` over `tap(x, y)`: coordinates break on every
+layout, density or rotation change, whereas text and view ids survive a rebuild.
+Call `get_device_info` if you do need the coordinate space — it reports the
+display size, density and current orientation.
+
+`http_request` reaches plain `http://` as well as HTTPS, so LAN and localhost
+targets work; responses are capped at 20 000 bytes, redirects are **not**
+followed (the `Location` header is reported instead, so a caller-supplied
+`Authorization` never leaks to a redirect target), and the response's declared
+charset is honoured. Note that any client holding the pairing key can make the
+phone issue requests to any host it can reach — on a tailnet that is a wider
+reach than the phone-local tools.
+
+It covers the other half of testing: a deployed service *as the device
+sees it*. The response includes the device's own `User-Agent`, and the request
+carries its egress IP, so you can catch failures that a desktop `curl` cannot
+reproduce — mobile-network routing, carrier NAT, or a TLS configuration Android
+rejects.
+
+**Limits worth knowing.** This is black-box testing driven by the accessibility
+tree. There is no DOM, no JavaScript console, no network waterfall: Chrome's
+remote-debugging socket is reachable only through adb, not from an on-device app.
+On a web page the tree also contains browser chrome, so `wait_for "Example
+Domain"` may match a tab title rather than page content — keep queries specific.
+An app cannot read another app's logcat without adb or root, so crashes of the
+app under test are not visible here, and there is no APK install tool, so
+build → install → test belongs in a normal adb/CI pipeline.
+
+`get_device_info` reports the whole physical display, so in split-screen or
+freeform windowing its dimensions describe the screen rather than the app under
+test. `wait_for` polls the accessibility tree every 200 ms, which on a very large
+UI is not free — prefer short waits over long ones.
 
 ## A real-life scenario
 

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Since targetSdk 28 cleartext is denied by default, which made http_request unable to reach
+  any plain-HTTP target — i.e. most services you would test from a device on a LAN. This opts
+  outbound cleartext back in. It does not weaken lxconnect's own transport: the MCP server and
+  the pairing channel are HTTPS with a pinned certificate, terminated in TlsProxy.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

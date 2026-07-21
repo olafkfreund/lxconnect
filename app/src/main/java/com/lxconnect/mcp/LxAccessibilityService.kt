@@ -12,6 +12,7 @@ import android.util.Log
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.CountDownLatch
@@ -50,36 +51,142 @@ class LxAccessibilityService : AccessibilityService() {
 
         private const val NOT_CONNECTED = "Accessibility service not connected. Enable it in Settings first."
 
+        // App first, then the keyboard and the shade — press_key("notifications") and input_text
+        // both open windows that are not TYPE_APPLICATION, and filtering those out would make
+        // them invisible to read/tap/wait.
+        private val WINDOW_ORDER = listOf(
+            AccessibilityWindowInfo.TYPE_APPLICATION,
+            AccessibilityWindowInfo.TYPE_INPUT_METHOD,
+            AccessibilityWindowInfo.TYPE_SYSTEM,
+        )
+
+        private fun windowLabel(type: Int) = when (type) {
+            AccessibilityWindowInfo.TYPE_APPLICATION -> "application"
+            AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "keyboard"
+            AccessibilityWindowInfo.TYPE_SYSTEM -> "system"
+            else -> "other"
+        }
+
+        /**
+         * Roots to search, in a fixed priority. `rootInActiveWindow` follows *input* focus, which
+         * the notification shade or the IME steals from the app under test, so windows are asked
+         * for explicitly. read/tap/wait all consume this same list: if they searched different
+         * sets, `read_screen` could describe one window while `tap_text` acted on another.
+         */
+        private fun roots(svc: LxAccessibilityService): List<Pair<String, AccessibilityNodeInfo>> {
+            val found = svc.windows
+                .filter { it.type in WINDOW_ORDER }
+                .sortedWith(compareBy({ WINDOW_ORDER.indexOf(it.type) }, { !it.isActive }))
+                .mapNotNull { w -> w.root?.let { windowLabel(w.type) to it } }
+            return found.ifEmpty { listOfNotNull(svc.rootInActiveWindow?.let { "active" to it }) }
+        }
+
         fun readScreen(): String {
             val svc = instance ?: return NOT_CONNECTED
-            val root = svc.rootInActiveWindow ?: return "No active window content available."
+            val all = roots(svc)
+            if (all.isEmpty()) return "No active window content available."
             val sb = StringBuilder()
-            dumpNode(root, 0, sb)
-            return if (sb.isEmpty()) "No content found in the active window." else sb.toString()
+            all.forEach { (label, root) ->
+                sb.append("window=$label app=${root.packageName ?: "?"}\n")
+                dumpNode(root, 0, sb)
+            }
+            return sb.toString()
         }
 
         private fun dumpNode(node: AccessibilityNodeInfo, depth: Int, sb: StringBuilder) {
             val text = node.text?.toString().orEmpty()
             val desc = node.contentDescription?.toString().orEmpty()
-            if (text.isNotEmpty() || desc.isNotEmpty() || node.isClickable) {
+            if (text.isNotEmpty() || desc.isNotEmpty() || node.isClickable || node.isScrollable) {
                 val bounds = Rect()
                 node.getBoundsInScreen(bounds)
+                // id/scrollable/enabled make selectors survive a rebuild; bare bounds do not.
+                val id = node.viewIdResourceName?.substringAfterLast('/').orEmpty()
                 sb.append("  ".repeat(depth))
                     .append(node.className ?: "?")
-                    .append(" text=\"$text\" desc=\"$desc\" bounds=$bounds clickable=${node.isClickable}\n")
+                    .append(" id=\"$id\" text=\"$text\" desc=\"$desc\" bounds=$bounds")
+                    .append(" clickable=${node.isClickable} scrollable=${node.isScrollable} enabled=${node.isEnabled}\n")
             }
             for (i in 0 until node.childCount) {
                 node.getChild(i)?.let { dumpNode(it, depth + 1, sb) }
             }
         }
 
+        private val GLOBAL_ACTIONS = mapOf(
+            "back" to AccessibilityService.GLOBAL_ACTION_BACK,
+            "home" to AccessibilityService.GLOBAL_ACTION_HOME,
+            "recents" to AccessibilityService.GLOBAL_ACTION_RECENTS,
+            "notifications" to AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS,
+        )
+
+        fun pressKey(key: String): String {
+            val svc = instance ?: return NOT_CONNECTED
+            val action = GLOBAL_ACTIONS[key.lowercase()]
+                ?: return "Unknown key '$key'. Expected one of ${GLOBAL_ACTIONS.keys.joinToString("/")}."
+            return if (svc.performGlobalAction(action)) "Pressed $key." else "Failed to press $key."
+        }
+
+        /** First node whose text, contentDescription or view id matches [query]. */
+        private fun findNode(node: AccessibilityNodeInfo, query: String): AccessibilityNodeInfo? {
+            val id = node.viewIdResourceName?.substringAfterLast('/').orEmpty()
+            val hit = node.text?.toString()?.contains(query, ignoreCase = true) == true ||
+                node.contentDescription?.toString()?.contains(query, ignoreCase = true) == true ||
+                id.equals(query, ignoreCase = true)
+            if (hit) return node
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { findNode(it, query) }?.let { return it }
+            }
+            return null
+        }
+
+        fun findOnScreen(query: String): AccessibilityNodeInfo? {
+            val svc = instance ?: return null
+            return roots(svc).firstNotNullOfOrNull { (_, root) -> findNode(root, query) }
+        }
+
+        /** How far to climb looking for the clickable ancestor. See [tapText]. */
+        private const val MAX_CLICK_HOPS = 4
+
+        fun tapText(query: String): String {
+            val svc = instance ?: return NOT_CONNECTED
+            val node = findOnScreen(query) ?: return "No element matching \"$query\" on screen."
+            // The matching node often holds the label while its parent takes the click — but the
+            // climb has to be bounded. A dialog's scrim (or any dismiss-on-outside-touch root) is
+            // itself clickable, so an unbounded walk would dismiss the dialog and then report the
+            // tap as successful, which in a testing tool means a green result for an action that
+            // never happened.
+            var target: AccessibilityNodeInfo? = node
+            var hops = 0
+            while (target != null && !target.isClickable && hops < MAX_CLICK_HOPS) {
+                target = target.parent
+                hops++
+            }
+            if (target != null && target.isClickable && target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                return "Tapped \"$query\"."
+            }
+            // ponytail: custom views can report clickable and still ignore ACTION_CLICK, so fall
+            // back to a real gesture at the node's centre rather than reporting a false failure.
+            val bounds = Rect().also { node.getBoundsInScreen(it) }
+            if (bounds.isEmpty) return "Element \"$query\" has no tappable bounds."
+            return tap(bounds.centerX(), bounds.centerY()) + " (gesture fallback for \"$query\")"
+        }
+
+        fun waitFor(query: String, timeoutMs: Long): String {
+            if (instance == null) return NOT_CONNECTED
+            val deadline = System.currentTimeMillis() + timeoutMs
+            do {
+                findOnScreen(query)?.let {
+                    val bounds = Rect().also { b -> it.getBoundsInScreen(b) }
+                    return "Found \"$query\" at $bounds."
+                }
+                Thread.sleep(200)
+            } while (System.currentTimeMillis() < deadline)
+            return "Timed out after ${timeoutMs}ms waiting for \"$query\"."
+        }
+
         fun tap(x: Int, y: Int): String {
             val svc = instance ?: return NOT_CONNECTED
             val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
-            val gesture = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, 100))
-                .build()
-            return dispatchGestureSync(svc, gesture, "Tap")
+            return dispatchPath(svc, path, 100, "Tap")
         }
 
         fun swipe(x1: Int, y1: Int, x2: Int, y2: Int): String {
@@ -88,10 +195,22 @@ class LxAccessibilityService : AccessibilityService() {
                 moveTo(x1.toFloat(), y1.toFloat())
                 lineTo(x2.toFloat(), y2.toFloat())
             }
-            val gesture = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, 300))
-                .build()
-            return dispatchGestureSync(svc, gesture, "Swipe")
+            return dispatchPath(svc, path, 300, "Swipe")
+        }
+
+        private fun dispatchPath(svc: LxAccessibilityService, path: Path, durationMs: Long, label: String): String {
+            // StrokeDescription rejects coordinates outside the display. Off-screen bounds reach
+            // here routinely — a recycler keeps scrolled-away rows in the tree with negative
+            // bounds — and an uncaught throw would escape as a transport error instead of a
+            // usable tool result.
+            val gesture = try {
+                GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+                    .build()
+            } catch (e: IllegalArgumentException) {
+                return "$label rejected: coordinates are off-screen (${e.message}). Scroll the target into view first."
+            }
+            return dispatchGestureSync(svc, gesture, label)
         }
 
         // ponytail: blocking latch instead of a suspend/callback bridge — gestures are quick

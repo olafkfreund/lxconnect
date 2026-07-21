@@ -6,6 +6,8 @@ import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
@@ -100,6 +102,71 @@ fun Server.registerAccessibilityTools(context: Context) {
     ) { request ->
         val text = request.params.arguments?.get("text").asString("text")
         CallToolResult(content = listOf(TextContent(text = LxAccessibilityService.inputText(text))))
+    }
+
+    addTool(
+        name = "press_key",
+        description = "Press a hardware/system key: back, home, recents, or notifications.",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                putJsonObject("key") {
+                    put("type", "string")
+                    put("description", "One of: back, home, recents, notifications.")
+                }
+            },
+            required = listOf("key")
+        )
+    ) { request ->
+        val key = request.params.arguments?.get("key").asString("key")
+        CallToolResult(content = listOf(TextContent(text = LxAccessibilityService.pressKey(key))))
+    }
+
+    addTool(
+        name = "tap_text",
+        description = "Tap the element whose text, content description or view id matches the query. " +
+            "Survives layout changes, unlike tap(x,y).",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                putJsonObject("query") {
+                    put("type", "string")
+                    put("description", "Text, content description (substring, case-insensitive) or exact view id.")
+                }
+            },
+            required = listOf("query")
+        )
+    ) { request ->
+        val query = request.params.arguments?.get("query").asString("query")
+        CallToolResult(content = listOf(TextContent(text = LxAccessibilityService.tapText(query))))
+    }
+
+    addTool(
+        name = "wait_for",
+        description = "Block until an element matching the query appears on screen, or the timeout elapses. " +
+            "Use between steps instead of guessing at render times.",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                putJsonObject("query") {
+                    put("type", "string")
+                    put("description", "Text, content description (substring, case-insensitive) or exact view id.")
+                }
+                putJsonObject("timeoutMs") {
+                    put("type", "integer")
+                    put("description", "How long to wait in milliseconds (default 5000, max 15000).")
+                }
+            },
+            required = listOf("query")
+        )
+    ) { request ->
+        val query = request.params.arguments?.get("query").asString("query")
+        // Capped below the shipped clients' own call timeouts (20s CLI, 25s GUI): the SDK holds
+        // the POST open for the whole tool call, so a longer wait would hang the client past the
+        // timeout it thinks it has rather than returning a clean result.
+        val timeout = (request.params.arguments?.get("timeoutMs")?.jsonPrimitive?.int ?: 5000)
+            .coerceIn(0, 15_000).toLong()
+        // Tool bodies run inline on Ktor's call threads (one per core), so a blocking poll here
+        // would stall every other request — including new connections — for its whole duration.
+        val result = withContext(Dispatchers.IO) { LxAccessibilityService.waitFor(query, timeout) }
+        CallToolResult(content = listOf(TextContent(text = result)))
     }
 
     addTool(
