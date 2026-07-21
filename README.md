@@ -22,7 +22,7 @@ Three components:
 
 | Component | What it does |
 | --- | --- |
-| Android app | Runs an on-device MCP server exposing 30 typed tools plus an AccessibilityService for driving arbitrary app UIs. |
+| Android app | Runs an on-device MCP server exposing 34 typed tools plus an AccessibilityService for driving arbitrary app UIs. |
 | Python daemon | Bridges the phone to the desktop — notification mirroring, inline reply, tool dispatch, and trigger-based automations. |
 | GTK4 client | A proof-of-concept native desktop app that demonstrates every feature and runs a full self-test suite against the phone. |
 
@@ -30,7 +30,7 @@ Everything has been verified end to end on real hardware.
 
 ## Features
 
-- **MCP server on the phone.** Around 30 typed tools: SMS send and history,
+- **MCP server on the phone.** Around 34 typed tools: SMS send and history,
   notification listing and reply, contact search, media status and control,
   device and detailed status, ring, camera capture, clipboard, file transfer,
   app launch and stop, and deep links.
@@ -42,6 +42,10 @@ Everything has been verified end to end on real hardware.
   notification server, so it degrades cleanly.
 - **Accessibility control.** Tap, swipe, type, read the screen, and screenshot —
   so an agent can drive any app, not just the ones wrapped as tools.
+- **On-device testing.** Drive real test flows against the tablet: `tap_text` and
+  `wait_for` select elements by text or view id instead of brittle coordinates,
+  `press_key` navigates back/home/recents, and `http_request` probes a service
+  from the device's own network, TLS stack and egress IP.
 - **Secure by default.** HTTPS on the device with a self-signed certificate that
   the client pins by SHA-256 fingerprint; the fingerprint is exchanged during a
   QR-based, trust-on-first-use pairing.

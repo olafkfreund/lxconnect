@@ -103,6 +103,65 @@ fun Server.registerAccessibilityTools(context: Context) {
     }
 
     addTool(
+        name = "press_key",
+        description = "Press a hardware/system key: back, home, recents, or notifications.",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                putJsonObject("key") {
+                    put("type", "string")
+                    put("description", "One of: back, home, recents, notifications.")
+                }
+            },
+            required = listOf("key")
+        )
+    ) { request ->
+        val key = request.params.arguments?.get("key").asString("key")
+        CallToolResult(content = listOf(TextContent(text = LxAccessibilityService.pressKey(key))))
+    }
+
+    addTool(
+        name = "tap_text",
+        description = "Tap the element whose text, content description or view id matches the query. " +
+            "Survives layout changes, unlike tap(x,y).",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                putJsonObject("query") {
+                    put("type", "string")
+                    put("description", "Text, content description (substring, case-insensitive) or exact view id.")
+                }
+            },
+            required = listOf("query")
+        )
+    ) { request ->
+        val query = request.params.arguments?.get("query").asString("query")
+        CallToolResult(content = listOf(TextContent(text = LxAccessibilityService.tapText(query))))
+    }
+
+    addTool(
+        name = "wait_for",
+        description = "Block until an element matching the query appears on screen, or the timeout elapses. " +
+            "Use between steps instead of guessing at render times.",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                putJsonObject("query") {
+                    put("type", "string")
+                    put("description", "Text, content description (substring, case-insensitive) or exact view id.")
+                }
+                putJsonObject("timeoutMs") {
+                    put("type", "integer")
+                    put("description", "How long to wait in milliseconds (default 5000, max 60000).")
+                }
+            },
+            required = listOf("query")
+        )
+    ) { request ->
+        val query = request.params.arguments?.get("query").asString("query")
+        val timeout = (request.params.arguments?.get("timeoutMs")?.jsonPrimitive?.int ?: 5000)
+            .coerceIn(0, 60_000).toLong()
+        CallToolResult(content = listOf(TextContent(text = LxAccessibilityService.waitFor(query, timeout))))
+    }
+
+    addTool(
         name = "screenshot",
         description = "Capture a screenshot of the current screen via the Accessibility service (Android 11+ required).",
         inputSchema = ToolSchema(properties = buildJsonObject {}, required = emptyList())

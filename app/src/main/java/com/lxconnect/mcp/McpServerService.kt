@@ -391,7 +391,21 @@ class McpServerService : Service() {
             val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
             val pct = if (level >= 0 && scale > 0) (level * 100 / scale) else -1
             
-            val info = "Model: ${Build.MODEL}\nManufacturer: ${Build.MANUFACTURER}\nAndroid Version: ${Build.VERSION.RELEASE}\nBattery: $pct%"
+            // Screen geometry: tap/swipe take absolute pixels, so a client that cannot query the
+            // coordinate space is tapping blind.
+            // getRealMetrics honours the current rotation; WindowManager.currentWindowMetrics
+            // from a Service context reports the display's *natural* bounds, which would hand
+            // clients transposed axes on a landscape device.
+            val display = (getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
+                .getDisplay(android.view.Display.DEFAULT_DISPLAY)
+            val dm = android.util.DisplayMetrics()
+            @Suppress("DEPRECATION") display.getRealMetrics(dm)
+
+            val info = "Model: ${Build.MODEL}\nManufacturer: ${Build.MANUFACTURER}\n" +
+                "Android Version: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n" +
+                "Battery: $pct%\n" +
+                "Screen: ${dm.widthPixels}x${dm.heightPixels} px, density ${dm.density}, " +
+                (if (dm.widthPixels > dm.heightPixels) "landscape" else "portrait")
             CallToolResult(content = listOf(TextContent(text = info)))
         }
 
@@ -845,9 +859,86 @@ class McpServerService : Service() {
             }
         }
 
+        server.addTool(
+            name = "http_request",
+            description = "Make an HTTP request from the device's own network (its Wi-Fi or mobile data, its TLS stack, its egress IP). " +
+                "Use to test how a service behaves as seen from this device rather than from the desktop.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("url") {
+                        put("type", "string")
+                        put("description", "Absolute http:// or https:// URL.")
+                    }
+                    putJsonObject("method") {
+                        put("type", "string")
+                        put("description", "GET (default), POST, PUT, DELETE, HEAD or OPTIONS.")
+                    }
+                    putJsonObject("headers") {
+                        put("type", "object")
+                        put("description", "Request headers as a flat name/value object.")
+                    }
+                    putJsonObject("body") {
+                        put("type", "string")
+                        put("description", "Request body, for POST and PUT.")
+                    }
+                },
+                required = listOf("url")
+            )
+        ) { request ->
+            val args = request.params.arguments
+            val text = withContext(Dispatchers.IO) {
+                httpRequest(
+                    url = args?.get("url").asString("url"),
+                    method = args?.get("method")?.jsonPrimitive?.content?.uppercase() ?: "GET",
+                    headers = args?.get("headers") as? JsonObject,
+                    body = args?.get("body")?.jsonPrimitive?.content,
+                )
+            }
+            CallToolResult(content = listOf(TextContent(text = text)))
+        }
+
         server.registerAccessibilityTools(this@McpServerService)
 
         return server
+    }
+
+    /** HttpURLConnection has no PATCH support, so the allowed set is what it can actually send. */
+    private val HTTP_METHODS = setOf("GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS")
+
+    private fun httpRequest(url: String, method: String, headers: JsonObject?, body: String?): String {
+        if (method !in HTTP_METHODS) return "Unsupported method '$method'. Expected one of ${HTTP_METHODS.joinToString("/")}."
+        val parsed = try { java.net.URL(url) } catch (e: Exception) { return "Invalid URL: ${e.message}" }
+        if (parsed.protocol !in setOf("http", "https")) return "Only http and https URLs are allowed."
+
+        val started = System.currentTimeMillis()
+        var conn: java.net.HttpURLConnection? = null
+        return try {
+            conn = (parsed.openConnection() as java.net.HttpURLConnection).apply {
+                requestMethod = method
+                connectTimeout = 15_000
+                readTimeout = 15_000
+                headers?.forEach { (k, v) -> setRequestProperty(k, v.jsonPrimitive.content) }
+            }
+            if (body != null && (method == "POST" || method == "PUT")) {
+                conn.doOutput = true
+                conn.outputStream.use { it.write(body.toByteArray()) }
+            }
+            val code = conn.responseCode
+            // A 4xx/5xx body arrives on errorStream; reading inputStream would just throw.
+            val stream = if (code < 400) conn.inputStream else conn.errorStream
+            val payload = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            val elapsed = System.currentTimeMillis() - started
+            val headerText = conn.headerFields.entries
+                .filter { it.key != null }
+                .joinToString("\n") { "${it.key}: ${it.value.joinToString(", ")}" }
+            val shown = payload.take(MAX_HTTP_BODY)
+            val truncated = if (payload.length > MAX_HTTP_BODY) "\n… truncated (${payload.length} bytes total)" else ""
+            "HTTP $code in ${elapsed}ms\n$headerText\n\n$shown$truncated"
+        } catch (e: Exception) {
+            "Request failed after ${System.currentTimeMillis() - started}ms: ${e.javaClass.simpleName}: ${e.message}"
+        } finally {
+            conn?.disconnect()
+        }
     }
 
     private fun ringDevice(action: String): String {
@@ -920,6 +1011,7 @@ class McpServerService : Service() {
     companion object {
         private const val TAG = "McpServerService"
         private const val NOTIFICATION_ID = 42
+        private const val MAX_HTTP_BODY = 20_000
         private var activeRingtone: android.media.Ringtone? = null
 
         @Volatile
