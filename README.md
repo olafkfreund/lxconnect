@@ -30,10 +30,10 @@ Everything has been verified end to end on real hardware.
 
 ## Features
 
-- **MCP server on the phone.** Around 34 typed tools: SMS send and history,
-  notification listing and reply, contact search, media status and control,
-  device and detailed status, ring, camera capture, clipboard, file transfer,
-  app launch and stop, and deep links.
+- **MCP server on the phone.** 34 typed tools: SMS send and history, notification
+  listing and reply, contact search, media status and control, device and
+  detailed status, ring, camera capture, clipboard, file transfer, app launch and
+  stop, deep links, screen control, and HTTP requests issued from the device.
 - **Rich notification mirroring.** Phone notifications arrive on the desktop
   looking native: real app name and icon, the full expanded body, bold/italic and
   clickable links, inline images and sender avatars, inline reply, the app's own
@@ -58,6 +58,26 @@ Everything has been verified end to end on real hardware.
   [documentation](https://olafkfreund.github.io/lxconnect/documentation.html) for
   the full tool reference.
 - **Reproducible.** Packaged as a Nix flake, with CI and signed releases.
+
+## Use cases
+
+- **Your phone from your desk.** Read and answer messages without picking it up,
+  press an app's own notification buttons, click through to the exact
+  conversation on the phone, ring it when it's lost.
+- **A phone an agent can use.** *"Summarize my unread notifications and tell Alex
+  I'll be home by six"* becomes a short sequence of typed tool calls. Where no
+  tool exists, `read_screen` + `tap_text` let an agent drive an app lxconnect
+  knows nothing about.
+- **QA on a real device.** `start_app` → `wait_for` → `tap_text` → `screenshot`
+  runs a test flow against a real OEM device with no adb cable — over a tailnet
+  if you like. Good for exploratory and smoke testing and for reproducing
+  "only on that tablet" bugs; not a replacement for Espresso/UIAutomator in CI.
+- **Testing a service as a phone sees it.** `http_request` runs from the device's
+  own network and TLS stack, catching carrier NAT, mobile routing and handshake
+  failures a desktop `curl` cannot reproduce.
+
+Each is worked through end to end in the
+[documentation](https://olafkfreund.github.io/lxconnect/documentation.html#use-cases).
 
 ## Architecture
 
