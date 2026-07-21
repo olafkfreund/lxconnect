@@ -910,6 +910,15 @@ class McpServerService : Service() {
         val parsed = try { java.net.URL(url) } catch (e: Exception) { return "Invalid URL: ${e.message}" }
         if (parsed.protocol !in setOf("http", "https")) return "Only http and https URLs are allowed."
 
+        // Coerce headers before connecting: a nested object here would otherwise throw inside the
+        // request block and be reported as if the network had failed.
+        val headerPairs = mutableListOf<Pair<String, String>>()
+        headers?.forEach { (k, v) ->
+            val primitive = v as? JsonPrimitive
+                ?: return "Header '$k' must be a string; got ${v::class.simpleName}."
+            headerPairs.add(k to primitive.content)
+        }
+
         val started = System.currentTimeMillis()
         var conn: java.net.HttpURLConnection? = null
         return try {
@@ -917,7 +926,10 @@ class McpServerService : Service() {
                 requestMethod = method
                 connectTimeout = 15_000
                 readTimeout = 15_000
-                headers?.forEach { (k, v) -> setRequestProperty(k, v.jsonPrimitive.content) }
+                // Redirects re-send the caller's headers to the new host, so an Authorization or
+                // Cookie value would leak to wherever a 302 points. Report the hop instead.
+                instanceFollowRedirects = false
+                headerPairs.forEach { (k, v) -> setRequestProperty(k, v) }
             }
             if (body != null && (method == "POST" || method == "PUT")) {
                 conn.doOutput = true
@@ -926,19 +938,46 @@ class McpServerService : Service() {
             val code = conn.responseCode
             // A 4xx/5xx body arrives on errorStream; reading inputStream would just throw.
             val stream = if (code < 400) conn.inputStream else conn.errorStream
-            val payload = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            // Read capped at the source. Slurping the whole body first would let a large or
+            // never-ending response OOM the process — and OutOfMemoryError is an Error, so the
+            // catch below would not stop it taking the server down with it.
+            val raw = stream?.use { readCapped(it, MAX_HTTP_BODY) } ?: ByteArray(0)
+            val truncated = raw.size > MAX_HTTP_BODY
+            val payload = String(raw, 0, minOf(raw.size, MAX_HTTP_BODY), responseCharset(conn.contentType))
+
             val elapsed = System.currentTimeMillis() - started
             val headerText = conn.headerFields.entries
                 .filter { it.key != null }
                 .joinToString("\n") { "${it.key}: ${it.value.joinToString(", ")}" }
-            val shown = payload.take(MAX_HTTP_BODY)
-            val truncated = if (payload.length > MAX_HTTP_BODY) "\n… truncated (${payload.length} bytes total)" else ""
-            "HTTP $code in ${elapsed}ms\n$headerText\n\n$shown$truncated"
+            val note = if (truncated) "\n… truncated at $MAX_HTTP_BODY bytes" else ""
+            "HTTP $code in ${elapsed}ms\n$headerText\n\n$payload$note"
         } catch (e: Exception) {
             "Request failed after ${System.currentTimeMillis() - started}ms: ${e.javaClass.simpleName}: ${e.message}"
         } finally {
             conn?.disconnect()
         }
+    }
+
+    /** Stops reading once past [limit]; InputStream.readNBytes needs API 33 and minSdk here is 26. */
+    private fun readCapped(stream: java.io.InputStream, limit: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        while (out.size() <= limit) {
+            val n = stream.read(buf)
+            if (n < 0) break
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
+    }
+
+    /** Honour the response's declared charset; decoding everything as UTF-8 turns a correct
+     *  ISO-8859-1 or Shift-JIS body into mojibake that looks like a server bug. */
+    private fun responseCharset(contentType: String?): java.nio.charset.Charset {
+        val name = contentType?.split(';')
+            ?.firstOrNull { it.trim().startsWith("charset=", ignoreCase = true) }
+            ?.substringAfter('=')?.trim()?.trim('"')
+            ?: return Charsets.UTF_8
+        return try { java.nio.charset.Charset.forName(name) } catch (e: Exception) { Charsets.UTF_8 }
     }
 
     private fun ringDevice(action: String): String {

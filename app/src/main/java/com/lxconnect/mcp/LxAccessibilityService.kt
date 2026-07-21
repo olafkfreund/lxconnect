@@ -51,24 +51,45 @@ class LxAccessibilityService : AccessibilityService() {
 
         private const val NOT_CONNECTED = "Accessibility service not connected. Enable it in Settings first."
 
+        // App first, then the keyboard and the shade — press_key("notifications") and input_text
+        // both open windows that are not TYPE_APPLICATION, and filtering those out would make
+        // them invisible to read/tap/wait.
+        private val WINDOW_ORDER = listOf(
+            AccessibilityWindowInfo.TYPE_APPLICATION,
+            AccessibilityWindowInfo.TYPE_INPUT_METHOD,
+            AccessibilityWindowInfo.TYPE_SYSTEM,
+        )
+
+        private fun windowLabel(type: Int) = when (type) {
+            AccessibilityWindowInfo.TYPE_APPLICATION -> "application"
+            AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "keyboard"
+            AccessibilityWindowInfo.TYPE_SYSTEM -> "system"
+            else -> "other"
+        }
+
         /**
-         * Root nodes worth searching, foreground app first. `rootInActiveWindow` follows *input*
-         * focus, which the notification shade or the IME steals from the app under test — asking
-         * for application windows explicitly is what keeps read/tap/wait pointed at the app.
+         * Roots to search, in a fixed priority. `rootInActiveWindow` follows *input* focus, which
+         * the notification shade or the IME steals from the app under test, so windows are asked
+         * for explicitly. read/tap/wait all consume this same list: if they searched different
+         * sets, `read_screen` could describe one window while `tap_text` acted on another.
          */
-        private fun roots(svc: LxAccessibilityService): List<AccessibilityNodeInfo> {
-            val appRoots = svc.windows
-                .filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
-                .sortedByDescending { it.isActive }
-                .mapNotNull { it.root }
-            return appRoots.ifEmpty { listOfNotNull(svc.rootInActiveWindow) }
+        private fun roots(svc: LxAccessibilityService): List<Pair<String, AccessibilityNodeInfo>> {
+            val found = svc.windows
+                .filter { it.type in WINDOW_ORDER }
+                .sortedWith(compareBy({ WINDOW_ORDER.indexOf(it.type) }, { !it.isActive }))
+                .mapNotNull { w -> w.root?.let { windowLabel(w.type) to it } }
+            return found.ifEmpty { listOfNotNull(svc.rootInActiveWindow?.let { "active" to it }) }
         }
 
         fun readScreen(): String {
             val svc = instance ?: return NOT_CONNECTED
-            val root = roots(svc).firstOrNull() ?: return "No active window content available."
-            val sb = StringBuilder("app=${root.packageName ?: "?"}\n")
-            dumpNode(root, 0, sb)
+            val all = roots(svc)
+            if (all.isEmpty()) return "No active window content available."
+            val sb = StringBuilder()
+            all.forEach { (label, root) ->
+                sb.append("window=$label app=${root.packageName ?: "?"}\n")
+                dumpNode(root, 0, sb)
+            }
             return sb.toString()
         }
 
@@ -119,16 +140,27 @@ class LxAccessibilityService : AccessibilityService() {
 
         fun findOnScreen(query: String): AccessibilityNodeInfo? {
             val svc = instance ?: return null
-            return roots(svc).firstNotNullOfOrNull { findNode(it, query) }
+            return roots(svc).firstNotNullOfOrNull { (_, root) -> findNode(root, query) }
         }
+
+        /** How far to climb looking for the clickable ancestor. See [tapText]. */
+        private const val MAX_CLICK_HOPS = 4
 
         fun tapText(query: String): String {
             val svc = instance ?: return NOT_CONNECTED
             val node = findOnScreen(query) ?: return "No element matching \"$query\" on screen."
-            // The matching node often holds the label while its parent takes the click.
+            // The matching node often holds the label while its parent takes the click — but the
+            // climb has to be bounded. A dialog's scrim (or any dismiss-on-outside-touch root) is
+            // itself clickable, so an unbounded walk would dismiss the dialog and then report the
+            // tap as successful, which in a testing tool means a green result for an action that
+            // never happened.
             var target: AccessibilityNodeInfo? = node
-            while (target != null && !target.isClickable) target = target.parent
-            if (target != null && target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            var hops = 0
+            while (target != null && !target.isClickable && hops < MAX_CLICK_HOPS) {
+                target = target.parent
+                hops++
+            }
+            if (target != null && target.isClickable && target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
                 return "Tapped \"$query\"."
             }
             // ponytail: custom views can report clickable and still ignore ACTION_CLICK, so fall
@@ -154,10 +186,7 @@ class LxAccessibilityService : AccessibilityService() {
         fun tap(x: Int, y: Int): String {
             val svc = instance ?: return NOT_CONNECTED
             val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
-            val gesture = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, 100))
-                .build()
-            return dispatchGestureSync(svc, gesture, "Tap")
+            return dispatchPath(svc, path, 100, "Tap")
         }
 
         fun swipe(x1: Int, y1: Int, x2: Int, y2: Int): String {
@@ -166,10 +195,22 @@ class LxAccessibilityService : AccessibilityService() {
                 moveTo(x1.toFloat(), y1.toFloat())
                 lineTo(x2.toFloat(), y2.toFloat())
             }
-            val gesture = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, 300))
-                .build()
-            return dispatchGestureSync(svc, gesture, "Swipe")
+            return dispatchPath(svc, path, 300, "Swipe")
+        }
+
+        private fun dispatchPath(svc: LxAccessibilityService, path: Path, durationMs: Long, label: String): String {
+            // StrokeDescription rejects coordinates outside the display. Off-screen bounds reach
+            // here routinely — a recycler keeps scrolled-away rows in the tree with negative
+            // bounds — and an uncaught throw would escape as a transport error instead of a
+            // usable tool result.
+            val gesture = try {
+                GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+                    .build()
+            } catch (e: IllegalArgumentException) {
+                return "$label rejected: coordinates are off-screen (${e.message}). Scroll the target into view first."
+            }
+            return dispatchGestureSync(svc, gesture, label)
         }
 
         // ponytail: blocking latch instead of a suspend/callback bridge — gestures are quick

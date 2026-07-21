@@ -231,10 +231,10 @@ argument.
 
 | Tool | Arguments | Effect |
 | --- | --- | --- |
-| `read_screen` | — | Dump the foreground app's UI tree (class, view id, text, description, bounds, clickable, scrollable, enabled). |
+| `read_screen` | — | Dump the UI tree of each visible window — app, keyboard, then system shade — one `window=` block each (class, view id, text, description, bounds, clickable, scrollable, enabled). |
 | `tap` | `x`*, `y`* | Tap at screen coordinates. |
 | `tap_text` | `query`* | Tap the element matching a text/description substring or an exact view id. Prefer this over `tap`. |
-| `wait_for` | `query`*, `timeoutMs` (default 5000, max 60000) | Block until a matching element appears, or time out. |
+| `wait_for` | `query`*, `timeoutMs` (default 5000, max 15000) | Block until a matching element appears, or time out. Capped below the clients' own call timeouts. |
 | `press_key` | `key`* (`back`/`home`/`recents`/`notifications`) | Press a system navigation key. |
 | `swipe` | `x1`*, `y1`*, `x2`*, `y2`* | Swipe between two points. |
 | `input_text` | `text`* | Type into the focused editable field. |
@@ -264,7 +264,15 @@ layout, density or rotation change, whereas text and view ids survive a rebuild.
 Call `get_device_info` if you do need the coordinate space — it reports the
 display size, density and current orientation.
 
-`http_request` covers the other half: testing a deployed service *as the device
+`http_request` reaches plain `http://` as well as HTTPS, so LAN and localhost
+targets work; responses are capped at 20 000 bytes, redirects are **not**
+followed (the `Location` header is reported instead, so a caller-supplied
+`Authorization` never leaks to a redirect target), and the response's declared
+charset is honoured. Note that any client holding the pairing key can make the
+phone issue requests to any host it can reach — on a tailnet that is a wider
+reach than the phone-local tools.
+
+It covers the other half of testing: a deployed service *as the device
 sees it*. The response includes the device's own `User-Agent`, and the request
 carries its egress IP, so you can catch failures that a desktop `curl` cannot
 reproduce — mobile-network routing, carrier NAT, or a TLS configuration Android
@@ -278,6 +286,11 @@ Domain"` may match a tab title rather than page content — keep queries specifi
 An app cannot read another app's logcat without adb or root, so crashes of the
 app under test are not visible here, and there is no APK install tool, so
 build → install → test belongs in a normal adb/CI pipeline.
+
+`get_device_info` reports the whole physical display, so in split-screen or
+freeform windowing its dimensions describe the screen rather than the app under
+test. `wait_for` polls the accessibility tree every 200 ms, which on a very large
+UI is not free — prefer short waits over long ones.
 
 ## A real-life scenario
 

@@ -6,6 +6,8 @@ import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
@@ -149,16 +151,22 @@ fun Server.registerAccessibilityTools(context: Context) {
                 }
                 putJsonObject("timeoutMs") {
                     put("type", "integer")
-                    put("description", "How long to wait in milliseconds (default 5000, max 60000).")
+                    put("description", "How long to wait in milliseconds (default 5000, max 15000).")
                 }
             },
             required = listOf("query")
         )
     ) { request ->
         val query = request.params.arguments?.get("query").asString("query")
+        // Capped below the shipped clients' own call timeouts (20s CLI, 25s GUI): the SDK holds
+        // the POST open for the whole tool call, so a longer wait would hang the client past the
+        // timeout it thinks it has rather than returning a clean result.
         val timeout = (request.params.arguments?.get("timeoutMs")?.jsonPrimitive?.int ?: 5000)
-            .coerceIn(0, 60_000).toLong()
-        CallToolResult(content = listOf(TextContent(text = LxAccessibilityService.waitFor(query, timeout))))
+            .coerceIn(0, 15_000).toLong()
+        // Tool bodies run inline on Ktor's call threads (one per core), so a blocking poll here
+        // would stall every other request — including new connections — for its whole duration.
+        val result = withContext(Dispatchers.IO) { LxAccessibilityService.waitFor(query, timeout) }
+        CallToolResult(content = listOf(TextContent(text = result)))
     }
 
     addTool(
